@@ -1,6 +1,9 @@
 import os
 import sys
 import math
+import asyncio
+import threading
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any
 import pandas as pd
@@ -12,27 +15,119 @@ sys.stdout.reconfigure(encoding='utf-8')
 load_dotenv('.env')
 load_dotenv('.env.env')
 
-# Helper to support both local .env and Streamlit Community Cloud st.secrets
+# Helper to support both Streamlit Community Cloud st.secrets and local .env
 def get_config(key: str, default: str = "") -> str:
-    val = os.environ.get(key)
-    if val:
-        return val
+    # 1. Check st.secrets first for cloud deployments
     try:
         if hasattr(st, "secrets") and key in st.secrets:
-            return str(st.secrets[key])
+            val = st.secrets[key]
+            if val is not None:
+                return str(val).strip()
     except Exception:
         pass
+    
+    # 2. Fallback to os.environ / .env
+    val = os.environ.get(key)
+    if val:
+        return val.strip()
+        
     return default
+
+# Sync all configuration keys into environment so imported modules can access them
+CONFIG_KEYS = [
+    "GEMINI_API_KEY",
+    "SUPABASE_URL",
+    "SUPABASE_KEY",
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+    "DRIVE_FOLDER_ID",
+    "SERVICE_ACCOUNT_JSON",
+    "GCP_SERVICE_ACCOUNT"
+]
+
+for k in CONFIG_KEYS:
+    val = get_config(k)
+    if val:
+        os.environ[k] = val
 
 SUPABASE_URL = get_config("SUPABASE_URL")
 SUPABASE_KEY = get_config("SUPABASE_KEY")
 GEMINI_API_KEY = get_config("GEMINI_API_KEY")
+TELEGRAM_BOT_TOKEN = get_config("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = get_config("TELEGRAM_CHAT_ID")
+DRIVE_FOLDER_ID = get_config("DRIVE_FOLDER_ID", "1CofRa3fSzj8OEE28OvZHefrffRuMM6cN")
 
-# Import local modules
+# Import system modules
 from price_fetcher import fetch_platform_prices, get_best_online_deal, normalize_product_name
 from insights import calculate_price_comparison, generate_ai_grocery_insights
 
-# Page Config
+# --- Background Daemon Workers with Singleton Guard ---
+
+def _run_telegram_bot_loop():
+    """Isolated thread worker running Telegram Bot & APScheduler on its own event loop."""
+    if not TELEGRAM_BOT_TOKEN:
+        print("[Telegram Bot Worker]: TELEGRAM_BOT_TOKEN not provided. Skipping bot.")
+        return
+
+    # Dedicated asyncio loop for this background thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    try:
+        from telegram_bot import build_telegram_app, setup_scheduler
+        app = build_telegram_app()
+        scheduler = setup_scheduler(app)
+        print("[Telegram Bot Worker]: Starting polling loop on daemon thread...")
+        app.run_polling(drop_pending_updates=True, close_loop=False)
+    except Exception as e:
+        print(f"[Telegram Bot Worker Error]: {e}")
+
+def _run_drive_watcher_loop():
+    """Isolated thread worker running recursive Google Drive polling."""
+    try:
+        from drive_watcher import run_drive_watcher
+        print("[Drive Watcher Worker]: Starting recursive poller on daemon thread...")
+        run_drive_watcher(interval_seconds=60)
+    except Exception as e:
+        print(f"[Drive Watcher Worker Error]: {e}")
+
+@st.cache_resource
+def initialize_cloud_background_workers() -> Dict[str, Any]:
+    """
+    Singleton initializer ensuring Telegram Bot and Google Drive Watcher
+    run exactly ONCE in background daemon threads across all user reruns/sessions.
+    """
+    print("=" * 60)
+    print("🚀 Initializing Cloud Background Daemon Workers (@st.cache_resource)...")
+    
+    tg_thread = threading.Thread(
+        target=_run_telegram_bot_loop,
+        daemon=True,
+        name="CloudTelegramBotWorker"
+    )
+    tg_thread.start()
+    
+    drive_thread = threading.Thread(
+        target=_run_drive_watcher_loop,
+        daemon=True,
+        name="CloudDriveWatcherWorker"
+    )
+    drive_thread.start()
+    
+    print("✓ Background workers launched in non-blocking daemon threads.")
+    print("=" * 60)
+    
+    return {
+        "tg_thread": tg_thread,
+        "drive_thread": drive_thread,
+        "initialized_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+# Start background workers (runs only once per server lifetime)
+workers_handle = initialize_cloud_background_workers()
+
+# --- Streamlit Page Configuration ---
+
 st.set_page_config(
     page_title="Family Grocery Intelligence System",
     page_icon="🛒",
@@ -104,7 +199,7 @@ def load_purchase_history():
 inv_df = load_inventory_data()
 purchases_df = load_purchase_history()
 
-# --- Sidebar Controls ---
+# --- Sidebar Controls & Live Service Status ---
 
 with st.sidebar:
     st.image("https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=400&q=80", use_container_width=True)
@@ -113,6 +208,18 @@ with st.sidebar:
     
     st.divider()
     
+    # Background Service Status Indicator
+    bot_alive = workers_handle["tg_thread"].is_alive()
+    drive_alive = workers_handle["drive_thread"].is_alive()
+    
+    if bot_alive and drive_alive:
+        st.success("🟢 Cloud Bot & Drive Poller Active")
+    elif bot_alive or drive_alive:
+        st.warning(f"🟡 Services: {'Bot Active' if bot_alive else 'Bot Offline'} | {'Drive Poller Active' if drive_alive else 'Drive Offline'}")
+    else:
+        st.error("🔴 Background Workers Offline")
+
+    st.markdown("---")
     monthly_budget = st.number_input("Monthly Budget (₹)", value=12000, step=500, min_value=1000)
     
     st.divider()
@@ -123,10 +230,10 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.markdown("### 📱 Active Connected Services")
+    st.markdown("### 📱 Cloud Integrations")
     st.markdown("✅ **Telegram Bot:** `@Grocery6EBot`")
-    st.markdown("✅ **Google Drive Poller:** Active")
-    st.markdown("✅ **Friday 9AM IST Checklist:** Enabled")
+    st.markdown("✅ **Drive Auto-Ingestion:** Folder `1Cof...`")
+    st.markdown("✅ **Friday 9AM IST Checklist:** Scheduled")
     st.markdown("✅ **Supabase Database:** Connected")
 
 # --- Main Dashboard ---
@@ -145,7 +252,6 @@ current_grace_spent = 0.0
 current_online_spent = 0.0
 
 if not purchases_df.empty:
-    # Parse created_at to filter strictly by current calendar month
     df_temp = purchases_df.copy()
     if 'created_at' in df_temp.columns:
         df_temp['created_date'] = pd.to_datetime(df_temp['created_at'], errors='coerce')
@@ -160,7 +266,6 @@ if not purchases_df.empty:
         current_grace_spent = float(current_month_df[grace_mask]['total_price'].sum())
         current_online_spent = current_month_spent - current_grace_spent
     else:
-        # Fallback if no records recorded in current month yet
         current_month_spent = 0.0
         current_grace_spent = 0.0
         current_online_spent = 0.0
@@ -209,13 +314,11 @@ st.divider()
 
 # --- 2. Product Deduplication & Latest Grace Rates ---
 
-# Deduplicate items: For recurring items like Atta, Toor Dal, etc., group by Product Name and take most recent record
 latest_item_info = {}
 if not purchases_df.empty:
     for _, r in purchases_df.iterrows():
         raw_name = str(r['item_name']).strip()
         unit = str(r.get('unit', 'kg')).strip()
-        # Clean canonical key
         canonical_key = raw_name.upper()
         if canonical_key not in latest_item_info:
             latest_item_info[canonical_key] = {
@@ -227,7 +330,6 @@ if not purchases_df.empty:
         else:
             latest_item_info[canonical_key]['total_purchased_qty'] += float(r.get('quantity', 1.0))
 
-# Fallback/merge with inventory if any items exist only in inventory
 if not inv_df.empty:
     for _, r in inv_df.iterrows():
         raw_name = str(r['item_name']).strip()
@@ -312,10 +414,8 @@ for p in deduped_products:
 comp_df = pd.DataFrame(comparison_rows)
 
 if not comp_df.empty:
-    # Deduplicate strictly on Product Name in the final DataFrame
     comp_df = comp_df.drop_duplicates(subset=['Product Name'], keep='first')
 
-    # Filter controls
     f_col1, f_col2, f_col3 = st.columns([2, 1, 1])
     with f_col1:
         search_query = st.text_input("🔎 Search Product Name", placeholder="e.g. Toor Dal, Sunflower Oil, Salt, Atta...")
@@ -336,7 +436,6 @@ if not comp_df.empty:
     elif status_filter == "⚪ Fair Deals":
         filtered_df = filtered_df[filtered_df['Deal Status'] == 'Fair Deal']
 
-    # Display interactive data table
     display_df = filtered_df[['Product Name', 'Category', 'Unit', 'Last Grace Price (₹)', 'Lowest Live Price (₹)', 'Lowest Platform', '% Price Difference', 'Deal Status', 'Direct Purchase Link']].copy()
 
     st.dataframe(
@@ -362,7 +461,6 @@ st.subheader("📦 Live Pantry Inventory & Countdown Tracker")
 if not inv_df.empty:
     inv_display = inv_df.copy()
     
-    # Calculate days remaining and runout date
     today = datetime.now()
     days_list = []
     runout_dates = []
@@ -390,7 +488,6 @@ if not inv_df.empty:
     inv_display['Estimated Runout Date'] = runout_dates
     inv_display['Stock Status'] = status_icons
     
-    # Reorder columns
     cols_to_show = ['item_name', 'category', 'current_stock', 'unit', 'daily_consumption', 'min_threshold', 'Days Remaining', 'Estimated Runout Date', 'Stock Status']
     inv_clean = inv_display[cols_to_show].rename(columns={
         'item_name': 'Item Name',
@@ -401,10 +498,7 @@ if not inv_df.empty:
         'min_threshold': 'Min Threshold'
     })
     
-    # Deduplicate inventory items by Item Name
     inv_clean = inv_clean.drop_duplicates(subset=['Item Name'], keep='first')
-    
-    # Sort low stock first
     inv_clean = inv_clean.sort_values(by='Days Remaining')
     
     st.dataframe(
@@ -428,6 +522,6 @@ st.divider()
 st.markdown("""
 <div style="text-align: center; color: #94A3B8; font-size: 0.85rem; padding: 1.5rem 0;">
     Family Grocery Intelligence System • Built with Streamlit, Supabase, Google Gemini 2.5 Flash & Python-Telegram-Bot<br>
-    Ready for 1-Click Free Deployment to Streamlit Community Cloud
+    Self-Contained Cloud Deployment with Non-Blocking Daemon Workers
 </div>
 """, unsafe_allow_html=True)

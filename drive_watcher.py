@@ -45,14 +45,27 @@ init_db()
 
 def get_drive_service():
     sa_path = 'service_account.json' if os.path.exists('service_account.json') else 'service_account.json.json'
-    if not os.path.exists(sa_path):
-        raise FileNotFoundError(f"Service account file not found: {sa_path}")
+    if os.path.exists(sa_path):
+        creds = service_account.Credentials.from_service_account_file(
+            sa_path,
+            scopes=['https://www.googleapis.com/auth/drive.readonly']
+        )
+        return build('drive', 'v3', credentials=creds)
     
-    creds = service_account.Credentials.from_service_account_file(
-        sa_path,
-        scopes=['https://www.googleapis.com/auth/drive.readonly']
-    )
-    return build('drive', 'v3', credentials=creds)
+    # Cloud secrets fallback (raw JSON string in environment)
+    sa_json_str = os.environ.get('SERVICE_ACCOUNT_JSON') or os.environ.get('GCP_SERVICE_ACCOUNT')
+    if sa_json_str:
+        try:
+            info = json.loads(sa_json_str) if isinstance(sa_json_str, str) else sa_json_str
+            creds = service_account.Credentials.from_service_account_info(
+                info,
+                scopes=['https://www.googleapis.com/auth/drive.readonly']
+            )
+            return build('drive', 'v3', credentials=creds)
+        except Exception as e:
+            print(f"Error parsing SERVICE_ACCOUNT_JSON: {e}")
+
+    raise FileNotFoundError(f"Service account file not found ({sa_path}) and no SERVICE_ACCOUNT_JSON secret provided.")
 
 def is_file_processed(file_id: str) -> bool:
     conn = sqlite3.connect(DB_FILE)
