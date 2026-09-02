@@ -277,58 +277,77 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def handle_receipt_document_or_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    await message.reply_text("🧾 *Received receipt!* Analyzing items and prices using Gemini Vision AI...", parse_mode='Markdown')
-
-    file_bytes = None
-    file_name = "receipt.jpg"
-    mime_type = "image/jpeg"
-
-    if message.photo:
-        # Highest resolution photo
-        photo = message.photo[-1]
-        tg_file = await photo.get_file()
-        byte_arr = await tg_file.download_as_bytearray()
-        file_bytes = bytes(byte_arr)
-        mime_type = "image/jpeg"
-        file_name = f"receipt_{photo.file_id[:8]}.jpg"
-    elif message.document:
-        doc = message.document
-        tg_file = await doc.get_file()
-        byte_arr = await tg_file.download_as_bytearray()
-        file_bytes = bytes(byte_arr)
-        file_name = doc.file_name or "receipt.pdf"
-        mime_type = doc.mime_type or "application/pdf"
-
-    if not file_bytes:
-        await message.reply_text("⚠️ Could not read file data. Please try re-sending.")
+    if not message:
         return
 
-    # Parse with Gemini Vision
-    if not GEMINI_API_KEY:
-        await message.reply_text("⚠️ GEMINI_API_KEY is not configured.")
-        return
+    # 1. Immediate Receipt acknowledgment
+    status_msg = await message.reply_text("📥 Receipt image received! Reading with Gemini Vision...")
 
     try:
-        genai_client = genai.Client(api_key=GEMINI_API_KEY)
+        file_bytes = None
+        file_name = "receipt.jpg"
+        mime_type = "image/jpeg"
+
+        if message.photo:
+            photo = message.photo[-1]
+            tg_file = await photo.get_file()
+            byte_arr = await tg_file.download_as_bytearray()
+            file_bytes = bytes(byte_arr)
+            mime_type = "image/jpeg"
+            file_name = f"receipt_{photo.file_id[:8]}.jpg"
+        elif message.document:
+            doc = message.document
+            tg_file = await doc.get_file()
+            byte_arr = await tg_file.download_as_bytearray()
+            file_bytes = bytes(byte_arr)
+            file_name = doc.file_name or "receipt.pdf"
+            mime_type = doc.mime_type or "application/pdf"
+
+        if not file_bytes:
+            await status_msg.edit_text(
+                "❌ Failed to process receipt: Could not read uploaded file bytes.\n⚠️ Please verify image clarity or drop the file directly into Google Drive as a fallback."
+            )
+            return
+
+        # 2. Processing / Reading Step
+        try:
+            await status_msg.edit_text("⏳ Extracting store name, purchase date, and items...")
+        except Exception:
+            pass
+
+        # Check API key
+        api_key = os.environ.get('GEMINI_API_KEY') or GEMINI_API_KEY
+        if not api_key:
+            await status_msg.edit_text(
+                "❌ Failed to process receipt: GEMINI_API_KEY is not configured.\n⚠️ Please verify configuration or drop the file directly into Google Drive as a fallback."
+            )
+            return
+
+        genai_client = genai.Client(api_key=api_key)
         prompt = """
 Extract all grocery items from this receipt image or document.
-Return ONLY a valid JSON array of objects with the following schema:
-[
-  {
-    "store_name": "Store name or Grace World",
-    "item_name": "Item Description",
-    "quantity": 1.0,
-    "unit": "kg" or "g" or "L" or "pack" or "units",
-    "unit_price": 100.0,
-    "total_price": 100.0,
-    "category": "Staples" or "Cooking Essentials" or "Spices" or "Cleaning & Household" or "Snacks & Packaged" or "Beverages & Dairy" or "Personal Care"
-  }
-]
+Return ONLY a valid JSON object with the following schema:
+{
+  "store_name": "Store name (e.g. Grace Supermarket or Store Name)",
+  "purchase_date": "YYYY-MM-DD (or receipt date)",
+  "items": [
+    {
+      "item_name": "Item Description",
+      "quantity": 1.0,
+      "unit": "kg" or "g" or "L" or "pack" or "units",
+      "unit_price": 100.0,
+      "total_price": 100.0,
+      "category": "Staples" or "Cooking Essentials" or "Spices" or "Cleaning & Household" or "Snacks & Packaged" or "Beverages & Dairy" or "Personal Care"
+    }
+  ]
+}
 Do not add any markdown explanation. Return pure JSON.
 """
         part = types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
-        items = []
-        for m in ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-flash-latest']:
+        parsed_data = None
+        
+        # Resilient model fallback chain
+        for m in ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3.5-flash', 'gemini-pro-latest']:
             try:
                 resp = genai_client.models.generate_content(model=m, contents=[part, prompt])
                 if resp and resp.text:
@@ -336,14 +355,31 @@ Do not add any markdown explanation. Return pure JSON.
                     if txt.startswith('```'):
                         txt = re.sub(r'^```(json)?\s*', '', txt)
                         txt = re.sub(r'\s*```$', '', txt)
-                    items = json.loads(txt)
-                    break
-            except Exception:
+                    raw_json = json.loads(txt)
+                    if isinstance(raw_json, dict) and 'items' in raw_json:
+                        parsed_data = raw_json
+                        break
+                    elif isinstance(raw_json, list):
+                        parsed_data = {
+                            "store_name": "Grace Supermarket",
+                            "purchase_date": datetime.now().strftime('%Y-%m-%d'),
+                            "items": raw_json
+                        }
+                        break
+            except Exception as e:
+                logger.warning(f"Model {m} failed receipt vision: {e}")
                 continue
 
-        if not items:
-            await message.reply_text("⚠️ Could not detect itemized line items from this image. Please ensure text is legible.")
+        if not parsed_data or not parsed_data.get('items'):
+            await status_msg.edit_text(
+                "❌ Failed to process receipt: Could not detect legible line items from this image.\n⚠️ Please verify image clarity or drop the file directly into Google Drive as a fallback."
+            )
             return
+
+        store_name = parsed_data.get('store_name') or "Grace Supermarket"
+        purchase_date = parsed_data.get('purchase_date') or datetime.now().strftime('%Y-%m-%d')
+        items = parsed_data.get('items', [])
+        total_amount = sum(float(x.get('total_price', 0.0) or 0.0) for x in items)
 
         # Ingest into Supabase
         supabase = get_supabase()
@@ -352,44 +388,60 @@ Do not add any markdown explanation. Return pure JSON.
             existing_names = {x['item_name'] for x in existing_inv.data}
             
             for it in items:
-                name = it['item_name']
+                name = str(it.get('item_name', '')).strip()
+                if not name:
+                    continue
                 if name not in existing_names:
                     supabase.table("inventory").insert({
                         'item_name': name,
                         'category': it.get('category', 'Staples'),
-                        'current_stock': it.get('quantity', 1.0),
+                        'current_stock': float(it.get('quantity', 1.0) or 1.0),
                         'unit': it.get('unit', 'units'),
                         'daily_consumption': 0.08,
                         'min_threshold': 0.5,
-                        'last_restocked': datetime.now(timezone.utc).strftime('%Y-%m-%d')
+                        'last_restocked': purchase_date
                     }).execute()
                     existing_names.add(name)
 
                 supabase.table("purchase_history").insert({
                     'item_name': name,
-                    'store_name': it.get('store_name', 'Grace World'),
-                    'quantity': it.get('quantity', 1.0),
+                    'store_name': store_name,
+                    'quantity': float(it.get('quantity', 1.0) or 1.0),
                     'unit': it.get('unit', 'units'),
-                    'unit_price': it.get('unit_price', 0.0),
-                    'total_price': it.get('total_price', 0.0)
+                    'unit_price': float(it.get('unit_price', 0.0) or 0.0),
+                    'total_price': float(it.get('total_price', 0.0) or 0.0)
                 }).execute()
 
-        # Format breakdown response
-        total_bill = sum(float(x.get('total_price', 0.0)) for x in items)
-        store = items[0].get('store_name', 'Grace Supermarket')
-        lines = [f"✅ *Receipt Parsed & Synced to Database!*\n🏬 *Store:* {store}\n🧾 *Items Extracted:* {len(items)}\n💰 *Bill Total:* ₹{total_bill:.2f}\n\n*Itemized Breakdown:*"]
-        for it in items[:10]:
-            lines.append(f"• *{it['item_name']}*: {it['quantity']} {it['unit']} @ ₹{it['unit_price']:.2f} = ₹{it['total_price']:.2f}")
+        # 3. Successful Addition response
+        item_bullets = []
+        for it in items[:8]:
+            item_bullets.append(f"• {it['item_name']} (₹{float(it.get('total_price', 0.0)):,.2f})")
 
-        if len(items) > 10:
-            lines.append(f"_...and {len(items) - 10} more items._")
+        if len(items) > 8:
+            item_bullets.append(f"• _...and {len(items) - 8} more items_")
 
-        lines.append("\n🎉 _Inventory stock levels have been automatically updated!_")
-        await message.reply_text("\n".join(lines), parse_mode='Markdown')
+        success_text = (
+            f"✅ *Added to Pantry!*\n\n"
+            f"🏪 *Store:* {store_name}\n"
+            f"📅 *Date:* {purchase_date}\n"
+            f"💰 *Total:* ₹{total_amount:,.2f}\n"
+            f"🛒 *Items ({len(items)}):*\n"
+            + "\n".join(item_bullets) +
+            f"\n\n📊 _Dashboard budget buffer updated._"
+        )
+
+        await status_msg.edit_text(success_text, parse_mode='Markdown')
 
     except Exception as e:
-        logger.error(f"Error handling receipt: {e}")
-        await message.reply_text(f"⚠️ Error processing receipt: {e}")
+        logger.error(f"Error handling receipt: {e}", exc_info=True)
+        try:
+            await status_msg.edit_text(
+                f"❌ Failed to process receipt: {str(e)}\n⚠️ Please verify image clarity or drop the file directly into Google Drive as a fallback."
+            )
+        except Exception:
+            await message.reply_text(
+                f"❌ Failed to process receipt: {str(e)}\n⚠️ Please verify image clarity or drop the file directly into Google Drive as a fallback."
+            )
 
 # --- Scheduler Setup ---
 
