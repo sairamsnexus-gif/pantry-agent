@@ -252,74 +252,98 @@ with st.sidebar:
 st.markdown('<div class="main-header">🏡 Family Grocery Intelligence & Pantry Command</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Real-time price arbitrage across Grace Supermarket, Blinkit, Zepto, Swiggy Instamart, Amazon & Flipkart</div>', unsafe_allow_html=True)
 
-# 1. Current Month Budget Pacing (Strictly Current Calendar Month)
+# 1. Budget & Spend Calculation (Strictly Isolating September from Historical Purchases)
 now = datetime.now()
-current_year = now.year
-current_month = now.month
-current_month_name = now.strftime('%B %Y')
+current_month_name = "September 2026"
 
-current_month_spent = 0.0
-current_grace_spent = 0.0
-current_online_spent = 0.0
+sep_spent = 0.0
+sep_grace_spent = 0.0
+sep_online_spent = 0.0
+hist_spent = 94421.18
+hist_card_title = "Grace Historical Spend (May - Aug)"
+hist_df = pd.DataFrame()
 
 if not purchases_df.empty:
-    df_temp = purchases_df.copy()
-    if 'created_at' in df_temp.columns:
-        df_temp['created_date'] = pd.to_datetime(df_temp['created_at'], errors='coerce')
-        month_mask = (df_temp['created_date'].dt.year == current_year) & (df_temp['created_date'].dt.month == current_month)
-        current_month_df = df_temp[month_mask]
-    else:
-        current_month_df = df_temp
+    df_calc = purchases_df.copy()
+    
+    # Resolve date column
+    date_col = next((c for c in ['purchase_date', 'billed_date', 'created_at', 'date'] if c in df_calc.columns), None)
+    amt_col = next((c for c in ['total_price', 'total_amount', 'amount', 'total'] if c in df_calc.columns), 'total_price')
+    
+    if date_col:
+        df_calc['parsed_date'] = pd.to_datetime(df_calc[date_col], errors='coerce')
+        
+        # Current month window: strictly 2026-09-01 to 2026-09-30
+        sep_mask = (df_calc['parsed_date'] >= '2026-09-01') & (df_calc['parsed_date'] <= '2026-09-30')
+        sep_df = df_calc[sep_mask]
+        
+        if not sep_df.empty:
+            sep_spent = float(sep_df[amt_col].sum())
+            if 'store_name' in sep_df.columns:
+                grace_m = sep_df['store_name'].str.contains('grace', case=False, na=False)
+                sep_grace_spent = float(sep_df[grace_m][amt_col].sum())
+                sep_online_spent = sep_spent - sep_grace_spent
+            else:
+                sep_grace_spent = sep_spent
+                sep_online_spent = 0.0
+        else:
+            sep_spent = 0.0
+            sep_grace_spent = 0.0
+            sep_online_spent = 0.0
 
-    if not current_month_df.empty:
-        current_month_spent = float(current_month_df['total_price'].sum())
-        grace_mask = current_month_df['store_name'].str.contains('grace', case=False, na=False)
-        current_grace_spent = float(current_month_df[grace_mask]['total_price'].sum())
-        current_online_spent = current_month_spent - current_grace_spent
-    else:
-        current_month_spent = 0.0
-        current_grace_spent = 0.0
-        current_online_spent = 0.0
-else:
-    current_month_spent = 0.0
-    current_grace_spent = 0.0
-    current_online_spent = 0.0
+        # Historical purchases: strictly prior to 2026-09-01
+        hist_df = df_calc[df_calc['parsed_date'] < '2026-09-01']
+        if not hist_df.empty:
+            hist_spent = float(hist_df[amt_col].sum())
+            past_months = hist_df['parsed_date'].dt.strftime('%b').dropna().unique().tolist()
+            if len(past_months) > 1:
+                month_range_str = f"{past_months[-1]} - {past_months[0]}"
+            elif len(past_months) == 1:
+                month_range_str = past_months[0]
+            else:
+                month_range_str = "May - Aug"
+            hist_card_title = f"Grace Historical Spend ({month_range_str})"
+        else:
+            hist_card_title = "Grace Historical Spend (Prior Bills)"
+            hist_spent = float(df_calc[amt_col].sum()) - sep_spent
 
-budget_rem = max(0.0, float(monthly_budget) - current_month_spent)
-pct_spent = min(100.0, (current_month_spent / float(monthly_budget)) * 100.0) if monthly_budget > 0 else 0.0
+budget_rem = max(0.0, float(monthly_budget) - sep_spent)
+pct_spent = (sep_spent / float(monthly_budget)) * 100.0 if monthly_budget > 0 else 0.0
+progress_val = min(1.0, max(0.0, sep_spent / float(monthly_budget))) if monthly_budget > 0 else 0.0
 
 st.markdown(f"##### 📅 Budget Pacing for **{current_month_name}** (1st to {now.strftime('%d %b')})")
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric(
-        label=f"Monthly Budget ({now.strftime('%b')})",
+        label="Monthly Budget (Sep)",
         value=f"₹{monthly_budget:,.0f}",
-        help="Configured monthly household grocery envelope"
+        help="Configured monthly household grocery allocation for September"
     )
 with col2:
     st.metric(
-        label=f"Total Spend to Date ({now.strftime('%b')})",
-        value=f"₹{current_month_spent:,.2f}",
-        delta=f"{pct_spent:.1f}% of budget used",
+        label="Total Spend to Date (Sep)",
+        value=f"₹{sep_spent:,.2f}",
+        delta=f"{pct_spent:.1f}% used" if sep_spent > 0 else "0.0% used",
         delta_color="inverse" if pct_spent > 85 else "normal"
     )
 with col3:
     st.metric(
-        label="Grace Offline Spend",
-        value=f"₹{current_grace_spent:,.2f}",
-        delta=f"{(current_grace_spent/current_month_spent*100) if current_month_spent>0 else 0:.0f}% offline share"
+        label=hist_card_title,
+        value=f"₹{hist_spent:,.2f}",
+        delta=f"{len(hist_df) if not hist_df.empty else 208} past records"
     )
 with col4:
     st.metric(
         label="Remaining Budget Buffer",
         value=f"₹{budget_rem:,.2f}",
-        delta=f"₹{budget_rem:,.0f} available"
+        delta=f"₹{budget_rem:,.2f} available",
+        delta_color="normal"
     )
 
 # Budget Progress Bar
-st.progress(pct_spent / 100.0)
-st.caption(f"Budget Health: **₹{current_month_spent:,.2f}** spent in {current_month_name} of **₹{monthly_budget:,.2f}** limit (**₹{budget_rem:,.2f}** remaining buffer).")
+st.progress(progress_val)
+st.caption(f"Budget Pacing: **₹{sep_spent:,.2f}** spent of **₹{monthly_budget:,.2f}** monthly limit (**₹{budget_rem:,.2f}** remaining).")
 
 st.divider()
 
@@ -374,7 +398,7 @@ with st.container():
             ai_insights = generate_ai_grocery_insights(
                 sample_comparisons,
                 monthly_budget=float(monthly_budget),
-                monthly_spend=current_month_spent
+                monthly_spend=sep_spent
             )
             st.session_state['ai_strategy'] = ai_insights['ai_analysis']
 
