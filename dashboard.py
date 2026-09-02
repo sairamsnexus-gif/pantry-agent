@@ -178,6 +178,22 @@ st.markdown("""
         border-radius: 8px;
         font-weight: 600;
     }
+
+    /* Prevent horizontal overflow on tables and frames */
+    [data-testid="stDataFrame"] > div {
+        width: 100% !important;
+        overflow-x: hidden !important;
+    }
+    div[data-testid="stTable"] {
+        overflow-x: hidden !important;
+        width: 100% !important;
+    }
+    /* Ensure vertical scroll is clean and legible */
+    div[data-testid="stDataFrame"] div[role="grid"] {
+        max-height: 480px;
+        overflow-y: auto !important;
+        overflow-x: hidden !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -509,7 +525,17 @@ budget_rem = max(0.0, float(monthly_budget) - sep_spent)
 pct_spent = (sep_spent / float(monthly_budget)) * 100.0 if monthly_budget > 0 else 0.0
 progress_val = min(1.0, max(0.0, sep_spent / float(monthly_budget))) if monthly_budget > 0 else 0.0
 
-st.markdown(f"##### 📅 Budget Pacing for **{current_month_name}** (1st to {now.strftime('%d %b')})")
+today = datetime.now()
+day_str = today.strftime("%d %b")
+header_title = f"🗓️ Budget Pacing for {today.strftime('%B %Y')} (1st to {day_str})"
+
+head_c1, head_c2 = st.columns([3.5, 1.5])
+with head_c1:
+    st.markdown(f"##### {header_title}")
+with head_c2:
+    if st.button("🔄 Refresh Data & Flush Cache", key="flush_cache_header_btn", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
 col1, col2, col3, col4 = st.columns(4)
 with col1:
@@ -586,9 +612,15 @@ with st.popover("🔎 View Sep Spend Audit Breakdown", use_container_width=True)
         st.dataframe(
             audit_df[['Date', 'Platform / Store', 'Item Name', 'Qty', 'Amount (₹)', 'Ingestion Source', 'File / Ref']],
             column_config={
-                "Amount (₹)": st.column_config.NumberColumn(format="₹%.2f")
+                "Date": st.column_config.TextColumn("Date", width="small"),
+                "Platform / Store": st.column_config.TextColumn("Platform / Store", width="medium"),
+                "Item Name": st.column_config.TextColumn("Item Name", width="large"),
+                "Qty": st.column_config.TextColumn("Qty", width="small"),
+                "Amount (₹)": st.column_config.NumberColumn("Amount (₹)", format="₹%.2f", width="small"),
+                "Ingestion Source": st.column_config.TextColumn("Source", width="medium"),
+                "File / Ref": st.column_config.TextColumn("File / Ref", width="small")
             },
-            width="stretch",
+            use_container_width=True,
             hide_index=True
         )
         
@@ -722,7 +754,7 @@ if uploaded_files:
 
         if summary_records:
             st.success(f"✅ Ingested {len(summary_records)} receipts! Total added: ₹{sum(s['Total (₹)'] for s in summary_records):,.2f}")
-            st.dataframe(pd.DataFrame(summary_records), width="stretch", hide_index=True)
+            st.dataframe(pd.DataFrame(summary_records), use_container_width=True, hide_index=True)
             st.cache_data.clear()
             st.rerun()
 
@@ -874,12 +906,17 @@ with tab1:
         st.dataframe(
             display_df,
             column_config={
-                "Last Grace Price (₹)": st.column_config.NumberColumn(format="₹%.2f"),
-                "Lowest Live Price (₹)": st.column_config.NumberColumn(format="₹%.2f"),
-                "Direct Purchase Link": st.column_config.LinkColumn("Purchase Online", display_text="Open Store ↗"),
-                "Deal Status": st.column_config.TextColumn("Verdict")
+                "Product Name": st.column_config.TextColumn("Product Name", width="medium"),
+                "Category": st.column_config.TextColumn("Category", width="small"),
+                "Unit": st.column_config.TextColumn("Unit", width="small"),
+                "Last Grace Price (₹)": st.column_config.NumberColumn("Grace (₹)", format="₹%.2f", width="small"),
+                "Lowest Live Price (₹)": st.column_config.NumberColumn("Lowest (₹)", format="₹%.2f", width="small"),
+                "Lowest Platform": st.column_config.TextColumn("Platform", width="small"),
+                "% Price Difference": st.column_config.TextColumn("Diff %", width="small"),
+                "Deal Status": st.column_config.TextColumn("Verdict", width="small"),
+                "Direct Purchase Link": st.column_config.LinkColumn("Purchase Online", display_text="Open Store ↗", width="small")
             },
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
             height=450
         )
@@ -936,12 +973,15 @@ with tab2:
         st.dataframe(
             inv_clean,
             column_config={
-                "Current Stock": st.column_config.NumberColumn(format="%.2f"),
-                "Daily Burn Rate": st.column_config.NumberColumn(format="%.2f / day"),
-                "Days Remaining": st.column_config.NumberColumn(format="%d days"),
-                "Stock Status": st.column_config.TextColumn("Health")
+                "Item Name": st.column_config.TextColumn("Item Name", width="large"),
+                "Category": st.column_config.TextColumn("Category", width="medium"),
+                "Current Stock": st.column_config.NumberColumn(format="%.2f", width="small"),
+                "Daily Burn Rate": st.column_config.NumberColumn(format="%.2f / day", width="small"),
+                "Min Threshold": st.column_config.NumberColumn(format="%.1f", width="small"),
+                "Days Remaining": st.column_config.NumberColumn(format="%d days", width="small"),
+                "Stock Status": st.column_config.TextColumn("Health", width="medium")
             },
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
             height=450
         )
