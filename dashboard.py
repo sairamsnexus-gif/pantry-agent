@@ -242,8 +242,8 @@ if not inv_df.empty:
 
 deduped_products = list(latest_item_info.values())
 
-# 3. Kid-Simple AI Advice Card
-st.subheader("🤖 Kid-Simple AI Grocery Intelligence & Strategy")
+# 3. AI Advice Card
+st.subheader("🤖 AI Grocery Intelligence & Strategy")
 
 with st.container():
     if st.button("✨ Refresh AI Strategy", key="gen_ai_btn"):

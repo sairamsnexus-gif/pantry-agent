@@ -75,7 +75,7 @@ def calculate_price_comparison(item_name: str, grace_price: float, live_deals: L
 
 def generate_ai_grocery_insights(comparisons: List[Dict[str, Any]], monthly_budget: float = 12000.0, monthly_spend: float = 0.0) -> Dict[str, Any]:
     """
-    Leverages Gemini Flash to synthesize kid-simple family grocery strategy:
+    Leverages Gemini Flash to synthesize concise family grocery strategy:
     - 2-line executive summary with concrete numbers
     - 3-bullet compact list for Grace Exclusives: Item | Grace Price | Markup Online
     - Compact bulk buying & timing bullet list with exact numbers
@@ -120,7 +120,7 @@ You are the AI Grocery Strategist for a family with a ₹{monthly_budget:,.0f}/m
 Price Data:
 {json.dumps(summary_context, indent=2)}
 
-Generate KID-SIMPLE, ultra-compact household grocery advice strictly following this format:
+Generate ultra-compact, actionable household grocery advice strictly following this format:
 
 ### 💡 Quick Grocery Action Plan
 
@@ -199,5 +199,5 @@ if __name__ == '__main__':
     deals = fetch_platform_prices(sample_item, baseline_price=179.0)
     comparison = calculate_price_comparison(sample_item, 179.0, deals)
     ai_res = generate_ai_grocery_insights([comparison], monthly_spend=1580.0)
-    print("Kid-Simple AI Advice Output:")
+    print("AI Grocery Advice Output:")
     print(ai_res['ai_analysis'])
