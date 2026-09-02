@@ -81,7 +81,7 @@ def start_telegram_bot() -> threading.Thread:
             print("[Telegram Bot]: TELEGRAM_BOT_TOKEN is not configured in st.secrets or environment. Standing by.")
             return
 
-        print(f"[Telegram Bot]: Launching bot with token {token[:10]}... on dedicated event loop...")
+        print(f"[Telegram Bot]: Launching bot with token {token[:10]}... on dedicated event loop (stop_signals=None)...")
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -124,7 +124,6 @@ def initialize_cloud_background_workers() -> Dict[str, Any]:
     tg_thread = start_telegram_bot()
     drive_thread = start_drive_watcher()
     
-    # Start Autonomous SRE Healer Supervisor with restart callbacks
     start_healer_supervisor(
         tg_thread=tg_thread,
         drive_thread=drive_thread,
@@ -189,6 +188,74 @@ def get_supabase_client():
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 client = get_supabase_client()
+
+# --- Helpers for Batch Receipt Upload & Parsing ---
+
+def parse_receipt_bytes_with_gemini(file_bytes: bytes, mime_type: str, file_name: str) -> Optional[Dict[str, Any]]:
+    """Extracts itemized details from uploaded bill bytes using gemini-2.5-flash."""
+    api_key = get_config("GEMINI_API_KEY")
+    if not api_key:
+        return None
+    from google import genai
+    from google.genai import types
+    import re
+
+    genai_client = genai.Client(api_key=api_key)
+    prompt = """
+Extract all grocery items from this receipt image or document.
+Return ONLY a valid JSON object with the following schema:
+{
+  "store_name": "Store name (e.g. Grace Supermarket or Store Name)",
+  "purchase_date": "YYYY-MM-DD (or receipt date)",
+  "items": [
+    {
+      "item_name": "Item Description",
+      "quantity": 1.0,
+      "unit": "kg" or "g" or "L" or "pack" or "units",
+      "unit_price": 100.0,
+      "total_price": 100.0,
+      "category": "Staples" or "Cooking Essentials" or "Spices" or "Cleaning & Household" or "Snacks & Packaged" or "Beverages & Dairy" or "Personal Care"
+    }
+  ]
+}
+Do not add any markdown explanation. Return pure JSON.
+"""
+    try:
+        part = types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
+        resp = genai_client.models.generate_content(model="gemini-2.5-flash", contents=[part, prompt])
+        if resp and resp.text:
+            txt = resp.text.strip()
+            if txt.startswith('```'):
+                txt = re.sub(r'^```(json)?\s*', '', txt)
+                txt = re.sub(r'\s*```$', '', txt)
+            raw = json.loads(txt)
+            if isinstance(raw, dict) and 'items' in raw:
+                return raw
+            elif isinstance(raw, list):
+                return {
+                    "store_name": "Grace Supermarket",
+                    "purchase_date": datetime.now().strftime('%Y-%m-%d'),
+                    "items": raw
+                }
+    except Exception as e:
+        print(f"Error parsing receipt {file_name}: {e}")
+    return None
+
+def backup_to_google_drive(file_bytes: bytes, file_name: str, mime_type: str) -> Optional[str]:
+    """Archives a backup copy of the uploaded bill to Google Drive folder."""
+    try:
+        from drive_watcher import get_drive_service
+        service = get_drive_service()
+        if service and DRIVE_FOLDER_ID:
+            from googleapiclient.http import MediaIoBaseUpload
+            import io
+            media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=mime_type, resumable=True)
+            meta = {'name': file_name, 'parents': [DRIVE_FOLDER_ID]}
+            f = service.files().create(body=meta, media_body=media, fields='id').execute()
+            return f.get('id')
+    except Exception as e:
+        print(f"Drive backup notice for {file_name}: {e}")
+    return None
 
 # --- Data Fetching ---
 
@@ -309,6 +376,113 @@ with st.sidebar:
 
 st.markdown('<div class="main-header">🏡 Family Grocery Intelligence & Pantry Command</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">Real-time price arbitrage across Grace Supermarket, Blinkit, Zepto, Swiggy Instamart, Amazon & Flipkart</div>', unsafe_allow_html=True)
+
+# --- Batch Multi-File Receipt Uploader Section ---
+
+with st.expander("🧾 Upload & Ingest Grocery Receipts (Batch Multi-File Support)", expanded=False):
+    st.markdown("Upload one or more receipt photos or PDFs. Gemini Vision AI will automatically parse item prices, quantities, and update your pantry stock and monthly budget buffer.")
+    
+    if 'processed_files' not in st.session_state:
+        st.session_state.processed_files = set()
+
+    uploaded_files = st.file_uploader(
+        "Upload one or more grocery bills/screenshots (JPG, PNG, PDF):",
+        type=["png", "jpg", "jpeg", "pdf"],
+        accept_multiple_files=True,
+        key="multi_receipt_uploader"
+    )
+
+    if uploaded_files:
+        unprocessed = [f for f in uploaded_files if f.name not in st.session_state.processed_files]
+        
+        col_u1, col_u2 = st.columns([2, 4])
+        with col_u1:
+            process_btn = st.button(
+                f"🚀 Process {len(unprocessed)} New Receipts" if unprocessed else "✓ All Uploads Processed",
+                type="primary",
+                disabled=(len(unprocessed) == 0),
+                width="stretch"
+            )
+        with col_u2:
+            if len(unprocessed) == 0 and len(uploaded_files) > 0:
+                st.caption(f"✓ All {len(uploaded_files)} uploaded files have already been ingested into your pantry.")
+            elif len(unprocessed) > 0:
+                st.caption(f"{len(unprocessed)} files waiting to be parsed with Gemini Vision.")
+
+        if process_btn and unprocessed:
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+            total_files = len(unprocessed)
+            summary_records = []
+
+            for idx, file in enumerate(unprocessed):
+                status_text.info(f"⏳ Processing {idx + 1} of {total_files}: **{file.name}** with Gemini Vision...")
+                file_bytes = file.getvalue()
+                mime_type = file.type or ("application/pdf" if file.name.lower().endswith(".pdf") else "image/jpeg")
+
+                # Parse receipt
+                parsed = parse_receipt_bytes_with_gemini(file_bytes, mime_type, file.name)
+                
+                if parsed and parsed.get('items'):
+                    store_name = parsed.get('store_name') or "Grace Supermarket"
+                    purchase_date = parsed.get('purchase_date') or datetime.now().strftime('%Y-%m-%d')
+                    items = parsed.get('items', [])
+                    total_amount = sum(float(x.get('total_price', 0.0) or 0.0) for x in items)
+
+                    # Ingest to Supabase
+                    if client:
+                        existing_inv = client.table("inventory").select("item_name").execute()
+                        existing_names = {x['item_name'] for x in existing_inv.data}
+
+                        for it in items:
+                            name = str(it.get('item_name', '')).strip()
+                            if not name:
+                                continue
+                            if name not in existing_names:
+                                client.table("inventory").insert({
+                                    'item_name': name,
+                                    'category': it.get('category', 'Staples'),
+                                    'current_stock': float(it.get('quantity', 1.0) or 1.0),
+                                    'unit': it.get('unit', 'units'),
+                                    'daily_consumption': 0.08,
+                                    'min_threshold': 0.5,
+                                    'last_restocked': purchase_date
+                                }).execute()
+                                existing_names.add(name)
+
+                            client.table("purchase_history").insert({
+                                'item_name': name,
+                                'store_name': store_name,
+                                'quantity': float(it.get('quantity', 1.0) or 1.0),
+                                'unit': it.get('unit', 'units'),
+                                'unit_price': float(it.get('unit_price', 0.0) or 0.0),
+                                'total_price': float(it.get('total_price', 0.0) or 0.0)
+                            }).execute()
+
+                    # Archive to Google Drive
+                    backup_to_google_drive(file_bytes, file.name, mime_type)
+
+                    summary_records.append({
+                        "Filename": file.name,
+                        "Store": store_name,
+                        "Date": purchase_date,
+                        "Total (₹)": total_amount,
+                        "Items Count": len(items)
+                    })
+
+                st.session_state.processed_files.add(file.name)
+                progress_bar.progress((idx + 1) / total_files)
+
+            status_text.empty()
+            progress_bar.empty()
+
+            if summary_records:
+                st.success(f"✅ Ingested {len(summary_records)} receipts! Total added: ₹{sum(s['Total (₹)'] for s in summary_records):,.2f}")
+                st.dataframe(pd.DataFrame(summary_records), width="stretch", hide_index=True)
+                st.cache_data.clear()
+                st.rerun()
+
+st.divider()
 
 # 1. Budget & Spend Calculation (Strictly Isolating September from Historical Purchases)
 now = datetime.now()
