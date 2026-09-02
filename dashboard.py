@@ -395,14 +395,16 @@ with st.container():
                 comp = calculate_price_comparison(p['item_name'], base_p, deals)
                 sample_comparisons.append(comp)
             
+            inv_list = inv_df.to_dict('records') if not inv_df.empty else None
             ai_insights = generate_ai_grocery_insights(
                 sample_comparisons,
                 monthly_budget=float(monthly_budget),
-                monthly_spend=sep_spent
+                monthly_spend=sep_spent,
+                inventory_items=inv_list
             )
             st.session_state['ai_strategy'] = ai_insights['ai_analysis']
 
-    st.info(st.session_state['ai_strategy'])
+    st.markdown(st.session_state['ai_strategy'])
 
 st.divider()
 
