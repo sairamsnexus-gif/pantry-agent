@@ -1,5 +1,11 @@
 import os
 import sys
+
+# Ensure current working directory is in sys.path
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
 import io
 import time
 import json
@@ -27,9 +33,11 @@ SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', '1CofRa3fSzj8OEE28OvZHefrffRuMM6cN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+GEMINI_MODEL_NAME = "gemini-2.5-flash"
 DB_FILE = os.path.join(os.path.dirname(__file__), 'processed_files.db')
 
 _NO_CREDS_WARNED = False
+_LAST_429_DRIVE = 0.0
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -57,7 +65,6 @@ def get_drive_service():
     3. os.environ["GCP_SERVICE_ACCOUNT"] / os.environ["SERVICE_ACCOUNT_JSON"]
     Returns Google Drive service or None if credentials are not configured.
     """
-    # 1. Local file checks
     for sa_path in ['service_account.json', 'service_account.json.json']:
         if os.path.exists(sa_path):
             try:
@@ -69,7 +76,6 @@ def get_drive_service():
             except Exception as e:
                 logger.error(f"Error loading credentials from {sa_path}: {e}")
 
-    # 2. Check Streamlit cloud secrets if streamlit is imported/available
     try:
         import streamlit as st
         if hasattr(st, "secrets"):
@@ -90,7 +96,6 @@ def get_drive_service():
     except Exception:
         pass
 
-    # 3. Check environment variables
     for env_key in ['GCP_SERVICE_ACCOUNT', 'SERVICE_ACCOUNT_JSON']:
         val = os.environ.get(env_key)
         if val:
@@ -152,9 +157,15 @@ def list_drive_files_recursive(service, folder_id: str) -> List[dict]:
     return files_list
 
 def parse_bill_image_or_pdf(file_bytes: bytes, mime_type: str, file_name: str) -> List[dict]:
-    """Uses Gemini Vision to extract itemized grocery line items."""
+    """Uses Gemini 2.5 Flash Vision to extract itemized grocery line items with 429 protection."""
+    global _LAST_429_DRIVE
     if not GEMINI_API_KEY:
         logger.warning("GEMINI_API_KEY not configured for bill vision parsing.")
+        return []
+
+    # 60s cooldown if 429 occurred recently
+    if time.time() - _LAST_429_DRIVE < 60:
+        logger.info("[DriveWatcher] Waiting for 429 rate limit cooldown (60s)...")
         return []
 
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -177,23 +188,24 @@ Return RAW JSON only. Do not wrap in markdown or backticks.
 """
     try:
         part = types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
-        for model_name in ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-flash-latest']:
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=[part, prompt]
-                )
-                if response and response.text:
-                    txt = response.text.strip()
-                    if txt.startswith('```'):
-                        import re
-                        txt = re.sub(r'^```(json)?\s*', '', txt)
-                        txt = re.sub(r'\s*```$', '', txt)
-                    return json.loads(txt)
-            except Exception:
-                continue
+        response = client.models.generate_content(
+            model=GEMINI_MODEL_NAME,
+            contents=[part, prompt]
+        )
+        if response and response.text:
+            txt = response.text.strip()
+            if txt.startswith('```'):
+                import re
+                txt = re.sub(r'^```(json)?\s*', '', txt)
+                txt = re.sub(r'\s*```$', '', txt)
+            return json.loads(txt)
     except Exception as e:
-        logger.error(f"Error parsing bill image: {e}")
+        err_str = str(e)
+        if "429" in err_str or "ResourceExhausted" in err_str:
+            _LAST_429_DRIVE = time.time()
+            logger.warning("[DriveWatcher] Gemini 429 quota reached. Pausing vision parsing for 60s.")
+        else:
+            logger.error(f"Error parsing bill image: {e}")
         
     return []
 
@@ -251,7 +263,6 @@ def process_file_content(service, file_meta: dict):
     if extracted_items and SUPABASE_URL and SUPABASE_KEY:
         client = create_client(SUPABASE_URL, SUPABASE_KEY)
         
-        # 1. Fetch current inventory to avoid duplicates
         existing_inv = client.table("inventory").select("item_name").execute()
         existing_names = {x['item_name'] for x in existing_inv.data}
         
@@ -274,7 +285,6 @@ def process_file_content(service, file_meta: dict):
             for b in range(0, len(new_inv_items), 50):
                 client.table("inventory").insert(new_inv_items[b:b+50]).execute()
 
-        # 2. Batch insert purchase_history
         purchases = [
             {
                 'item_name': it['item_name'],
@@ -300,7 +310,7 @@ def poll_drive_folder():
         service = get_drive_service()
         if not service:
             if not _NO_CREDS_WARNED:
-                logger.warning("[Google Drive Poller] No Service Account credentials configured (service_account.json or GCP_SERVICE_ACCOUNT secret). Drive watcher is in standby mode.")
+                logger.warning("[Google Drive Poller] No Service Account credentials configured. Drive watcher is in standby mode.")
                 _NO_CREDS_WARNED = True
             return
 
@@ -312,11 +322,12 @@ def poll_drive_folder():
         logger.error(f"Drive poller error: {e}")
 
 def run_drive_watcher(interval_seconds: int = 60):
-    """Continuous background loop monitoring Google Drive."""
+    """Continuous background loop monitoring Google Drive with minimum 60s interval."""
+    interval = max(60, interval_seconds)
     init_db()
     while True:
         poll_drive_folder()
-        time.sleep(interval_seconds)
+        time.sleep(interval)
 
 if __name__ == '__main__':
     poll_drive_folder()

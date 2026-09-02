@@ -49,7 +49,7 @@ class SystemHealthRegistry:
         self.supabase_status: Dict[str, Any] = {"status": "INITIALIZING", "message": "Probing...", "latency_ms": 0}
         self.telegram_status: Dict[str, Any] = {"status": "INITIALIZING", "message": "Starting...", "retries": 0}
         self.drive_status: Dict[str, Any] = {"status": "INITIALIZING", "message": "Evaluating...", "last_poll": None}
-        self.llm_status: Dict[str, Any] = {"status": "INITIALIZING", "message": "Checking models...", "active_model": "gemini-flash-latest"}
+        self.llm_status: Dict[str, Any] = {"status": "INITIALIZING", "message": "Checking configuration...", "active_model": "gemini-2.5-flash"}
         self.remediation_log: deque = deque(maxlen=max_log_size)
         self.error_log: deque = deque(maxlen=max_log_size)
         self.supervisor_alive: bool = False
@@ -96,10 +96,10 @@ class SystemHealthRegistry:
 
 HEALTH_REGISTRY = SystemHealthRegistry()
 
-# --- Component Probes ---
+# --- Component Probes (Lightweight, Non-Intrusive, No AI Polling) ---
 
 def probe_supabase_db():
-    """Lightweight probe verifying Supabase connectivity and schema integrity."""
+    """Lightweight probe verifying Supabase connectivity (SELECT id LIMIT 1) every 60s."""
     url = get_secret("SUPABASE_URL")
     key = get_secret("SUPABASE_KEY")
     
@@ -178,53 +178,19 @@ def probe_google_drive_auth() -> bool:
         return False
 
 def probe_llm_pipeline():
-    """Validates Gemini models and establishes active fallback pipeline."""
+    """Validates Gemini configuration in-memory without making API calls on a timer."""
     api_key = get_secret("GEMINI_API_KEY")
     if not api_key:
         HEALTH_REGISTRY.llm_status = {
             "status": "OFFLINE",
             "message": "GEMINI_API_KEY missing",
-            "active_model": "None"
+            "active_model": "gemini-2.5-flash"
         }
-        return
-
-    try:
-        from google import genai
-        client = genai.Client(api_key=api_key)
-        
-        # Test models in order of proven resilience
-        supported_models = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3.5-flash', 'gemini-pro-latest']
-        active_model = None
-        
-        for m in supported_models:
-            try:
-                resp = client.models.generate_content(
-                    model=m,
-                    contents="Reply with OK"
-                )
-                if resp and resp.text:
-                    active_model = m
-                    break
-            except Exception:
-                continue
-                
-        if active_model:
-            HEALTH_REGISTRY.llm_status = {
-                "status": "HEALTHY",
-                "message": f"Active ({active_model})",
-                "active_model": active_model
-            }
-        else:
-            HEALTH_REGISTRY.llm_status = {
-                "status": "DEGRADED",
-                "message": "Fallback heuristics active",
-                "active_model": "gemini-flash-latest"
-            }
-    except Exception as e:
+    else:
         HEALTH_REGISTRY.llm_status = {
-            "status": "DEGRADED",
-            "message": f"LLM Notice: {str(e)[:60]}",
-            "active_model": "gemini-flash-latest"
+            "status": "HEALTHY",
+            "message": "Configured & Ready",
+            "active_model": "gemini-2.5-flash"
         }
 
 def probe_and_heal_telegram_bot(restart_callback=None):
@@ -286,7 +252,7 @@ _RESTART_BOT_HOOK = None
 _RESTART_DRIVE_HOOK = None
 
 def _supervisor_daemon_loop():
-    """Supervisor thread running periodic probes and self-healing actions."""
+    """Supervisor thread running periodic probes (no Gemini API calls on a timer)."""
     HEALTH_REGISTRY.supervisor_alive = True
     logger.info("🛡️ Autonomous Self-Healing SRE Supervisor Thread Started.")
     
@@ -301,7 +267,7 @@ def _supervisor_daemon_loop():
             # 3. Probe and Heal Telegram Bot
             probe_and_heal_telegram_bot(_RESTART_BOT_HOOK)
             
-            # 4. Probe Gemini LLM Pipeline
+            # 4. Check LLM Configuration (in-memory, 0 quota used)
             probe_llm_pipeline()
             
         except Exception as e:
@@ -372,7 +338,7 @@ def force_self_repair() -> Dict[str, Any]:
     return HEALTH_REGISTRY.get_summary()
 
 if __name__ == '__main__':
-    print("Testing Agent Healer Self-Diagnostic...")
+    print("Testing Agent Healer Self-Diagnostic (0 API calls)...")
     probe_supabase_db()
     probe_google_drive_auth()
     probe_llm_pipeline()

@@ -346,29 +346,30 @@ Do not add any markdown explanation. Return pure JSON.
         part = types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
         parsed_data = None
         
-        # Resilient model fallback chain
-        for m in ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3.5-flash', 'gemini-pro-latest']:
-            try:
-                resp = genai_client.models.generate_content(model=m, contents=[part, prompt])
-                if resp and resp.text:
-                    txt = resp.text.strip()
-                    if txt.startswith('```'):
-                        txt = re.sub(r'^```(json)?\s*', '', txt)
-                        txt = re.sub(r'\s*```$', '', txt)
-                    raw_json = json.loads(txt)
-                    if isinstance(raw_json, dict) and 'items' in raw_json:
-                        parsed_data = raw_json
-                        break
-                    elif isinstance(raw_json, list):
-                        parsed_data = {
-                            "store_name": "Grace Supermarket",
-                            "purchase_date": datetime.now().strftime('%Y-%m-%d'),
-                            "items": raw_json
-                        }
-                        break
-            except Exception as e:
-                logger.warning(f"Model {m} failed receipt vision: {e}")
-                continue
+        try:
+            resp = genai_client.models.generate_content(model="gemini-2.5-flash", contents=[part, prompt])
+            if resp and resp.text:
+                txt = resp.text.strip()
+                if txt.startswith('```'):
+                    txt = re.sub(r'^```(json)?\s*', '', txt)
+                    txt = re.sub(r'\s*```$', '', txt)
+                raw_json = json.loads(txt)
+                if isinstance(raw_json, dict) and 'items' in raw_json:
+                    parsed_data = raw_json
+                elif isinstance(raw_json, list):
+                    parsed_data = {
+                        "store_name": "Grace Supermarket",
+                        "purchase_date": datetime.now().strftime('%Y-%m-%d'),
+                        "items": raw_json
+                    }
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "ResourceExhausted" in err_str:
+                await status_msg.edit_text(
+                    "⚠️ *Gemini API Quota Exceeded (429)*\nPlease wait 60 seconds before re-uploading, or drop the receipt in Google Drive."
+                )
+                return
+            logger.warning(f"Receipt vision parsing exception: {e}")
 
         if not parsed_data or not parsed_data.get('items'):
             await status_msg.edit_text(

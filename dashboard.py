@@ -440,34 +440,36 @@ if not inv_df.empty:
 
 deduped_products = list(latest_item_info.values())
 
-# 3. AI Advice Card
+# 3. AI Advice Card (Cached with 1-hour TTL to prevent quota exhaustion)
 st.subheader("🤖 AI Grocery Intelligence & Strategy")
+
+@st.cache_data(ttl=3600)
+def generate_cached_ai_strategy(product_count: int, budget: float, spend: float) -> str:
+    sample_comparisons = []
+    for p in deduped_products[:25]:
+        base_p = p.get('last_grace_price', 100.0)
+        if base_p <= 0:
+            base_p = 100.0
+        deals = fetch_platform_prices(p['item_name'], base_p)
+        comp = calculate_price_comparison(p['item_name'], base_p, deals)
+        sample_comparisons.append(comp)
+    
+    inv_list = inv_df.to_dict('records') if not inv_df.empty else None
+    ai_insights = generate_ai_grocery_insights(
+        sample_comparisons,
+        monthly_budget=budget,
+        monthly_spend=spend,
+        inventory_items=inv_list
+    )
+    return ai_insights.get('ai_analysis', 'AI Action Plan Ready.')
 
 with st.container():
     if st.button("✨ Refresh AI Strategy", key="gen_ai_btn"):
-        st.session_state['ai_strategy'] = None
+        generate_cached_ai_strategy.clear()
+        st.rerun()
 
-    if 'ai_strategy' not in st.session_state or st.session_state['ai_strategy'] is None:
-        with st.spinner("Synthesizing concise grocery advice with Gemini Flash..."):
-            sample_comparisons = []
-            for p in deduped_products[:25]:
-                base_p = p.get('last_grace_price', 100.0)
-                if base_p <= 0:
-                    base_p = 100.0
-                deals = fetch_platform_prices(p['item_name'], base_p)
-                comp = calculate_price_comparison(p['item_name'], base_p, deals)
-                sample_comparisons.append(comp)
-            
-            inv_list = inv_df.to_dict('records') if not inv_df.empty else None
-            ai_insights = generate_ai_grocery_insights(
-                sample_comparisons,
-                monthly_budget=float(monthly_budget),
-                monthly_spend=sep_spent,
-                inventory_items=inv_list
-            )
-            st.session_state['ai_strategy'] = ai_insights.get('ai_analysis', 'AI Action Plan Ready.')
-
-    st.markdown(st.session_state.get('ai_strategy', ''))
+    ai_strategy_text = generate_cached_ai_strategy(len(deduped_products), float(monthly_budget), sep_spent)
+    st.markdown(ai_strategy_text)
 
 st.divider()
 

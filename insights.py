@@ -5,7 +5,9 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
+import time
 import json
+import logging
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
 from google import genai
@@ -15,7 +17,12 @@ sys.stdout.reconfigure(encoding='utf-8')
 load_dotenv('.env')
 load_dotenv('.env.env')
 
+logger = logging.getLogger("Insights")
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+GEMINI_MODEL_NAME = "gemini-2.5-flash"
+
+# Global cooldown tracker for 429 RateLimit/ResourceExhausted
+_LAST_429_TIME = 0.0
 
 def get_gemini_client():
     if not GEMINI_API_KEY:
@@ -81,11 +88,11 @@ def generate_ai_grocery_insights(
     inventory_items: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
     """
-    Synthesizes strictly formatted Quick Grocery Action Plan:
-    1. Single clean strategy line: 🎯 Best Online Deal: Buy [Product Name] on [Platform] at ₹[Price] ([X]% cheaper).
-    2. Strict vertical list for 🏬 Grace Exclusives (Cheaper Offline)
-    3. Strict vertical list for 📦 Bulk Buying & Restock Timing
+    Synthesizes strictly formatted Quick Grocery Action Plan using stable gemini-2.5-flash
+    with automatic 429 exponential backoff and deterministic fallback.
     """
+    global _LAST_429_TIME
+    
     best_buys = [c for c in comparisons if c['deal_status'] == 'Best Buy Online']
     do_not_buys = [c for c in comparisons if c['deal_status'] == 'Do Not Buy Online']
     
@@ -113,7 +120,6 @@ def generate_ai_grocery_insights(
     # 3. Bulk Buying & Timing list (one per line)
     timing_lines = []
     if inventory_items:
-        # Find low stock or upcoming restocks
         sorted_inv = sorted(
             inventory_items,
             key=lambda x: (float(x.get('current_stock', 1.0)) / max(0.01, float(x.get('daily_consumption', 0.08))))
@@ -126,7 +132,6 @@ def generate_ai_grocery_insights(
             days = max(1, int(stock / daily))
             state = "Low Stock" if days <= 5 else "Healthy"
             
-            # Find price if available in comparisons
             match_comp = next((c for c in comparisons if c['item_name'] == name), None)
             price = match_comp['lowest_price'] if match_comp else (stock * 80.0 if stock > 0 else 150.0)
             
@@ -139,12 +144,13 @@ def generate_ai_grocery_insights(
             "* **Aashirvaad Atta 5kg** — Status: Low Stock (2.0 kg left) | Next refill in 5 days (Best price: ₹245.00)"
         ]
 
-    # Try Gemini Flash generation with strict structural prompt
-    gemini_client = get_gemini_client()
+    # Check 429 cooldown (60s minimum interval after rate limit)
+    now = time.time()
     ai_text = None
-
-    if gemini_client:
-        prompt = f"""
+    if now - _LAST_429_TIME > 60:
+        gemini_client = get_gemini_client()
+        if gemini_client:
+            prompt = f"""
 You are the AI Grocery Strategist.
 Data:
 - Top Online Deal: {strategy_line}
@@ -164,20 +170,24 @@ Every item MUST be on its own line:
 **📦 Bulk Buying & Restock Timing**
 {chr(10).join(timing_lines)}
 """
-        for model_name in ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-flash-latest']:
             try:
                 response = gemini_client.models.generate_content(
-                    model=model_name,
+                    model=GEMINI_MODEL_NAME,
                     contents=prompt
                 )
                 if response and response.text:
                     txt = response.text.strip()
                     if "Quick Grocery Action Plan" in txt and "Grace Exclusives" in txt:
                         ai_text = txt
-                        break
-            except Exception:
-                continue
+            except Exception as e:
+                err_msg = str(e)
+                if "429" in err_msg or "ResourceExhausted" in err_msg:
+                    _LAST_429_TIME = time.time()
+                    logger.warning("[Insights] Gemini API 429 rate limit hit. Pausing AI calls for 60s and using deterministic plan.")
+                else:
+                    logger.warning(f"[Insights] Gemini call notice: {e}")
 
+    # Fallback to pristine deterministic structure
     if not ai_text:
         ai_text = f"""### 💡 Quick Grocery Action Plan
 
