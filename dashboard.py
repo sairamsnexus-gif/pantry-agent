@@ -1,12 +1,18 @@
 import os
 import sys
+
+# Ensure current working directory is at top of sys.path for Streamlit Cloud imports
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.insert(0, CURRENT_DIR)
+
 import json
 import math
 import asyncio
 import threading
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
@@ -68,7 +74,6 @@ from insights import calculate_price_comparison, generate_ai_grocery_insights
 
 def start_telegram_bot():
     """Starts Telegram Bot polling loop on an isolated asyncio event loop with error capture."""
-    import asyncio
     token = get_config("TELEGRAM_BOT_TOKEN")
     if not token:
         print("[Telegram Bot]: TELEGRAM_BOT_TOKEN is not configured in st.secrets or environment. Standing by.")
@@ -214,8 +219,11 @@ with st.sidebar:
     st.divider()
     
     # Background Service Status Indicators
-    bot_alive = workers_handle["tg_thread"].is_alive()
-    drive_alive = workers_handle["drive_thread"].is_alive()
+    tg_th = workers_handle.get("tg_thread")
+    dr_th = workers_handle.get("drive_thread")
+    
+    bot_alive = tg_th.is_alive() if tg_th else False
+    drive_alive = dr_th.is_alive() if dr_th else False
     
     if bot_alive and drive_alive:
         st.success("🟢 Bot Active (@Grocery6EBot)\n🟢 Drive Poller Active")
@@ -266,7 +274,6 @@ hist_df = pd.DataFrame()
 if not purchases_df.empty:
     df_calc = purchases_df.copy()
     
-    # Resolve date column
     date_col = next((c for c in ['purchase_date', 'billed_date', 'created_at', 'date'] if c in df_calc.columns), None)
     amt_col = next((c for c in ['total_price', 'total_amount', 'amount', 'total'] if c in df_calc.columns), 'total_price')
     
@@ -352,7 +359,9 @@ st.divider()
 latest_item_info = {}
 if not purchases_df.empty:
     for _, r in purchases_df.iterrows():
-        raw_name = str(r['item_name']).strip()
+        raw_name = str(r.get('item_name', '')).strip()
+        if not raw_name:
+            continue
         unit = str(r.get('unit', 'kg')).strip()
         canonical_key = raw_name.upper()
         if canonical_key not in latest_item_info:
@@ -360,21 +369,23 @@ if not purchases_df.empty:
                 'item_name': raw_name,
                 'unit': unit,
                 'last_grace_price': float(r.get('unit_price', 0.0) or 0.0),
-                'total_purchased_qty': float(r.get('quantity', 1.0))
+                'total_purchased_qty': float(r.get('quantity', 1.0) or 1.0)
             }
         else:
-            latest_item_info[canonical_key]['total_purchased_qty'] += float(r.get('quantity', 1.0))
+            latest_item_info[canonical_key]['total_purchased_qty'] += float(r.get('quantity', 1.0) or 1.0)
 
 if not inv_df.empty:
     for _, r in inv_df.iterrows():
-        raw_name = str(r['item_name']).strip()
+        raw_name = str(r.get('item_name', '')).strip()
+        if not raw_name:
+            continue
         canonical_key = raw_name.upper()
         if canonical_key not in latest_item_info:
             latest_item_info[canonical_key] = {
                 'item_name': raw_name,
                 'unit': str(r.get('unit', 'units')).strip(),
                 'last_grace_price': 100.0,
-                'total_purchased_qty': float(r.get('current_stock', 1.0))
+                'total_purchased_qty': float(r.get('current_stock', 1.0) or 1.0)
             }
 
 deduped_products = list(latest_item_info.values())
@@ -390,7 +401,9 @@ with st.container():
         with st.spinner("Synthesizing concise grocery advice with Gemini Flash..."):
             sample_comparisons = []
             for p in deduped_products[:25]:
-                base_p = p['last_grace_price'] if p['last_grace_price'] > 0 else 100.0
+                base_p = p.get('last_grace_price', 100.0)
+                if base_p <= 0:
+                    base_p = 100.0
                 deals = fetch_platform_prices(p['item_name'], base_p)
                 comp = calculate_price_comparison(p['item_name'], base_p, deals)
                 sample_comparisons.append(comp)
@@ -402,9 +415,9 @@ with st.container():
                 monthly_spend=sep_spent,
                 inventory_items=inv_list
             )
-            st.session_state['ai_strategy'] = ai_insights['ai_analysis']
+            st.session_state['ai_strategy'] = ai_insights.get('ai_analysis', 'AI Action Plan Ready.')
 
-    st.markdown(st.session_state['ai_strategy'])
+    st.markdown(st.session_state.get('ai_strategy', ''))
 
 st.divider()
 
@@ -419,9 +432,11 @@ with btn_col1:
 # Build deduplicated comparison rows
 comparison_rows = []
 for p in deduped_products:
-    item_name = p['item_name']
-    base_p = p['last_grace_price'] if p['last_grace_price'] > 0 else 100.0
-    unit_str = p['unit']
+    item_name = p.get('item_name', '')
+    base_p = float(p.get('last_grace_price', 100.0) or 100.0)
+    if base_p <= 0:
+        base_p = 100.0
+    unit_str = p.get('unit', 'units')
     
     deals = fetch_platform_prices(item_name, base_p, force_refresh=force_refresh)
     comp = calculate_price_comparison(item_name, base_p, deals)
@@ -432,20 +447,20 @@ for p in deduped_products:
         if len(cat_match) > 0:
             category_str = cat_match[0]
 
-    pct = comp['pct_diff']
+    pct = comp.get('pct_diff', 0.0)
     pct_formatted = f"📉 {abs(pct):.1f}% Cheaper" if pct < 0 else (f"📈 +{pct:.1f}% Costlier" if pct > 0 else "0.0% (Equal)")
     
     comparison_rows.append({
         'Product Name': item_name,
         'Category': category_str,
         'Unit': unit_str,
-        'Last Grace Price (₹)': comp['grace_price'],
-        'Lowest Live Price (₹)': comp['lowest_price'],
-        'Lowest Platform': comp['lowest_platform'],
+        'Last Grace Price (₹)': comp.get('grace_price', base_p),
+        'Lowest Live Price (₹)': comp.get('lowest_price', base_p),
+        'Lowest Platform': comp.get('lowest_platform', 'Grace World'),
         '% Price Difference': pct_formatted,
         'Pct_Val': pct,
-        'Deal Status': comp['deal_status'],
-        'Direct Purchase Link': comp['purchase_link']
+        'Deal Status': comp.get('deal_status', 'Neutral'),
+        'Direct Purchase Link': comp.get('purchase_link', '#')
     })
 
 comp_df = pd.DataFrame(comparison_rows)
@@ -504,9 +519,9 @@ if not inv_df.empty:
     status_icons = []
     
     for _, row in inv_display.iterrows():
-        stock = float(row.get('current_stock', 0.0))
-        daily = float(row.get('daily_consumption', 0.08))
-        thresh = float(row.get('min_threshold', 0.5))
+        stock = float(row.get('current_stock', 0.0) or 0.0)
+        daily = float(row.get('daily_consumption', 0.08) or 0.08)
+        thresh = float(row.get('min_threshold', 0.5) or 0.5)
         
         days = int(stock / daily) if daily > 0 else 999
         days_list.append(days)
