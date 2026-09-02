@@ -439,7 +439,7 @@ def run_bot(token: str = None):
     bot_token = token or os.environ.get('TELEGRAM_BOT_TOKEN') or TELEGRAM_BOT_TOKEN
     print(f"Starting Telegram Bot & Scheduler (Token: {bot_token[:10]}...)...")
     app = build_telegram_app(bot_token)
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, stop_signals=None, close_loop=False)
 
 if __name__ == '__main__':
     run_bot()
