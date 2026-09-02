@@ -540,6 +540,81 @@ with col4:
 st.progress(progress_val)
 st.caption(f"Budget Pacing: **₹{sep_spent:,.2f}** spent of **₹{monthly_budget:,.2f}** monthly limit (**₹{budget_rem:,.2f}** remaining buffer).")
 
+# 🔎 Interactive September Spend Audit Popover
+with st.popover("🔎 View Sep Spend Audit Breakdown", use_container_width=True):
+    st.markdown("#### 🧾 September 2026 Ingested Transaction Audit")
+    st.markdown(f"**Showing {len(sep_df)} purchases totaling ₹{sep_spent:,.2f}**")
+    
+    if not sep_df.empty:
+        audit_rows = []
+        for _, r in sep_df.iterrows():
+            rec_id = r.get('id')
+            p_date_raw = pd.to_datetime(r.get('purchase_date') or r.get('purchased_at'))
+            date_str = p_date_raw.strftime('%d-%b-%Y') if pd.notnull(p_date_raw) else '02-Sep-2026'
+            store = str(r.get('store_name', 'Grocery Store'))
+            item = str(r.get('item_name', 'Item'))
+            qty = f"{float(r.get('quantity', 1.0) or 1.0):.1f} {r.get('unit', 'units')}"
+            amt = float(r.get('total_price', 0.0) or 0.0)
+            
+            # Identify Ingestion Source Tag & File Ref
+            if 'Amazon' in store:
+                source = "📁 Google Drive"
+                ref = "Sep2nd2026.jpg"
+            elif 'GRACE' in store.upper():
+                source = "🧾 Supermarket Bill"
+                ref = f"Grace Bill #{rec_id}"
+            else:
+                source = "📱 Telegram / Web Ingestion"
+                ref = f"Receipt #{rec_id}"
+                
+            audit_rows.append({
+                "ID": rec_id,
+                "Date": date_str,
+                "Platform / Store": store,
+                "Item Name": item,
+                "Qty": qty,
+                "Amount (₹)": amt,
+                "Ingestion Source": source,
+                "File / Ref": ref
+            })
+            
+        audit_df = pd.DataFrame(audit_rows)
+        
+        st.dataframe(
+            audit_df[['Date', 'Platform / Store', 'Item Name', 'Qty', 'Amount (₹)', 'Ingestion Source', 'File / Ref']],
+            column_config={
+                "Amount (₹)": st.column_config.NumberColumn(format="₹%.2f")
+            },
+            width="stretch",
+            hide_index=True
+        )
+        
+        st.divider()
+        st.markdown("##### ✏️ Transaction Correction & Duplicate Purge")
+        c_sel, c_act1, c_act2 = st.columns([3, 2, 2])
+        with c_sel:
+            selected_tx = st.selectbox(
+                "Select Record to Modify / Purge:",
+                options=audit_df['ID'].tolist(),
+                format_func=lambda x: f"ID {x}: {audit_df[audit_df['ID'] == x]['Item Name'].values[0]} (₹{audit_df[audit_df['ID'] == x]['Amount (₹)'].values[0]:.2f})"
+            )
+        with c_act1:
+            if st.button("🗑️ Delete Record", type="secondary", width="stretch", key="del_audit_btn"):
+                if client and selected_tx:
+                    client.table("purchase_history").delete().eq("id", selected_tx).execute()
+                    st.success(f"Deleted record ID {selected_tx}!")
+                    st.cache_data.clear()
+                    st.rerun()
+        with c_act2:
+            if st.button("✏️ Move to August", width="stretch", key="move_aug_btn"):
+                if client and selected_tx:
+                    client.table("purchase_history").update({"purchased_at": "2026-08-31T23:59:59+00:00"}).eq("id", selected_tx).execute()
+                    st.success(f"Moved record ID {selected_tx} to August baseline!")
+                    st.cache_data.clear()
+                    st.rerun()
+    else:
+        st.info("No September transactions recorded yet.")
+
 st.divider()
 
 # --- 2. Direct Batch Multi-File Receipt Uploader Section ---
