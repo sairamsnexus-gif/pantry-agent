@@ -4,6 +4,7 @@ import io
 import time
 import json
 import sqlite3
+import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -19,11 +20,16 @@ sys.stdout.reconfigure(encoding='utf-8')
 load_dotenv('.env')
 load_dotenv('.env.env')
 
+logger = logging.getLogger("DriveWatcher")
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', '1CofRa3fSzj8OEE28OvZHefrffRuMM6cN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 DB_FILE = os.path.join(os.path.dirname(__file__), 'processed_files.db')
+
+_NO_CREDS_WARNED = False
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -44,28 +50,61 @@ def init_db():
 init_db()
 
 def get_drive_service():
-    sa_path = 'service_account.json' if os.path.exists('service_account.json') else 'service_account.json.json'
-    if os.path.exists(sa_path):
-        creds = service_account.Credentials.from_service_account_file(
-            sa_path,
-            scopes=['https://www.googleapis.com/auth/drive.readonly']
-        )
-        return build('drive', 'v3', credentials=creds)
-    
-    # Cloud secrets fallback (raw JSON string in environment)
-    sa_json_str = os.environ.get('SERVICE_ACCOUNT_JSON') or os.environ.get('GCP_SERVICE_ACCOUNT')
-    if sa_json_str:
-        try:
-            info = json.loads(sa_json_str) if isinstance(sa_json_str, str) else sa_json_str
-            creds = service_account.Credentials.from_service_account_info(
-                info,
-                scopes=['https://www.googleapis.com/auth/drive.readonly']
-            )
-            return build('drive', 'v3', credentials=creds)
-        except Exception as e:
-            print(f"Error parsing SERVICE_ACCOUNT_JSON: {e}")
+    """
+    Resolves Google Drive API service using:
+    1. Local service_account.json / service_account.json.json file
+    2. st.secrets["GCP_SERVICE_ACCOUNT"] (as dict or JSON string)
+    3. os.environ["GCP_SERVICE_ACCOUNT"] / os.environ["SERVICE_ACCOUNT_JSON"]
+    Returns Google Drive service or None if credentials are not configured.
+    """
+    # 1. Local file checks
+    for sa_path in ['service_account.json', 'service_account.json.json']:
+        if os.path.exists(sa_path):
+            try:
+                creds = service_account.Credentials.from_service_account_file(
+                    sa_path,
+                    scopes=['https://www.googleapis.com/auth/drive.readonly']
+                )
+                return build('drive', 'v3', credentials=creds)
+            except Exception as e:
+                logger.error(f"Error loading credentials from {sa_path}: {e}")
 
-    raise FileNotFoundError(f"Service account file not found ({sa_path}) and no SERVICE_ACCOUNT_JSON secret provided.")
+    # 2. Check Streamlit cloud secrets if streamlit is imported/available
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets"):
+            for sec_key in ["GCP_SERVICE_ACCOUNT", "SERVICE_ACCOUNT_JSON", "gcp_service_account"]:
+                if sec_key in st.secrets:
+                    val = st.secrets[sec_key]
+                    if isinstance(val, dict) or hasattr(val, "items"):
+                        info = dict(val)
+                    elif isinstance(val, str) and val.strip().startswith("{"):
+                        info = json.loads(val.strip())
+                    else:
+                        continue
+                    creds = service_account.Credentials.from_service_account_info(
+                        info,
+                        scopes=['https://www.googleapis.com/auth/drive.readonly']
+                    )
+                    return build('drive', 'v3', credentials=creds)
+    except Exception:
+        pass
+
+    # 3. Check environment variables
+    for env_key in ['GCP_SERVICE_ACCOUNT', 'SERVICE_ACCOUNT_JSON']:
+        val = os.environ.get(env_key)
+        if val:
+            try:
+                info = json.loads(val) if isinstance(val, str) else dict(val)
+                creds = service_account.Credentials.from_service_account_info(
+                    info,
+                    scopes=['https://www.googleapis.com/auth/drive.readonly']
+                )
+                return build('drive', 'v3', credentials=creds)
+            except Exception as e:
+                logger.error(f"Error parsing environment {env_key}: {e}")
+
+    return None
 
 def is_file_processed(file_id: str) -> bool:
     conn = sqlite3.connect(DB_FILE)
@@ -115,7 +154,7 @@ def list_drive_files_recursive(service, folder_id: str) -> List[dict]:
 def parse_bill_image_or_pdf(file_bytes: bytes, mime_type: str, file_name: str) -> List[dict]:
     """Uses Gemini Vision to extract itemized grocery line items."""
     if not GEMINI_API_KEY:
-        print("GEMINI_API_KEY not configured for bill vision parsing.")
+        logger.warning("GEMINI_API_KEY not configured for bill vision parsing.")
         return []
 
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -154,7 +193,7 @@ Return RAW JSON only. Do not wrap in markdown or backticks.
             except Exception:
                 continue
     except Exception as e:
-        print(f"Error parsing bill image: {e}")
+        logger.error(f"Error parsing bill image: {e}")
         
     return []
 
@@ -163,7 +202,7 @@ def process_file_content(service, file_meta: dict):
     file_name = file_meta['name']
     mime_type = file_meta['mimeType']
     
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Processing Drive file: {file_name} ({file_id})")
+    logger.info(f"Processing Drive file: {file_name} ({file_id})")
     
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
@@ -207,7 +246,7 @@ def process_file_content(service, file_meta: dict):
         mark_file_processed(file_id, file_name, mime_type, 'SKIPPED_UNSUPPORTED', 0)
         return
 
-    print(f"Extracted {len(extracted_items)} items from {file_name}")
+    logger.info(f"Extracted {len(extracted_items)} items from {file_name}")
 
     if extracted_items and SUPABASE_URL and SUPABASE_KEY:
         client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -252,20 +291,28 @@ def process_file_content(service, file_meta: dict):
             client.table("purchase_history").insert(purchases[b:b+50]).execute()
 
     mark_file_processed(file_id, file_name, mime_type, 'SUCCESS', len(extracted_items))
-    print(f"Drive file {file_name} successfully ingested into Supabase!")
+    logger.info(f"Drive file {file_name} successfully ingested into Supabase!")
 
 def poll_drive_folder():
+    """Single polling cycle checking Google Drive folder for new bills."""
+    global _NO_CREDS_WARNED
     try:
         service = get_drive_service()
+        if not service:
+            if not _NO_CREDS_WARNED:
+                logger.warning("[Google Drive Poller] No Service Account credentials configured (service_account.json or GCP_SERVICE_ACCOUNT secret). Drive watcher is in standby mode.")
+                _NO_CREDS_WARNED = True
+            return
+
         files = list_drive_files_recursive(service, DRIVE_FOLDER_ID)
         for f in files:
             if not is_file_processed(f['id']):
                 process_file_content(service, f)
     except Exception as e:
-        print(f"Drive polling notice: {e}")
+        logger.error(f"Drive poller error: {e}")
 
 def run_drive_watcher(interval_seconds: int = 60):
-    print(f"Starting Google Drive Recursive Poller (Folder: {DRIVE_FOLDER_ID}, Interval: {interval_seconds}s)...")
+    """Continuous background loop monitoring Google Drive."""
     init_db()
     while True:
         poll_drive_folder()

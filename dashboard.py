@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import math
 import asyncio
 import threading
@@ -22,6 +23,8 @@ def get_config(key: str, default: str = "") -> str:
         if hasattr(st, "secrets") and key in st.secrets:
             val = st.secrets[key]
             if val is not None:
+                if isinstance(val, dict) or hasattr(val, "items"):
+                    return json.dumps(dict(val))
                 return str(val).strip()
     except Exception:
         pass
@@ -69,7 +72,6 @@ def _run_telegram_bot_loop():
         print("[Telegram Bot Worker]: TELEGRAM_BOT_TOKEN not provided. Skipping bot.")
         return
 
-    # Dedicated asyncio loop for this background thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
@@ -202,7 +204,7 @@ purchases_df = load_purchase_history()
 # --- Sidebar Controls & Live Service Status ---
 
 with st.sidebar:
-    st.image("https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=400&q=80", use_container_width=True)
+    st.image("https://images.unsplash.com/photo-1542838132-92c53300491e?auto=format&fit=crop&w=400&q=80", width="stretch")
     st.title("🛒 Family Pantry Agent")
     st.caption("AI-Powered Grocery Spend & Price Optimizer")
     
@@ -225,7 +227,7 @@ with st.sidebar:
     st.divider()
     st.subheader("⚡ Quick Actions")
     
-    if st.button("🔄 Refresh Data Cache", use_container_width=True):
+    if st.button("🔄 Refresh Data Cache", width="stretch"):
         st.cache_data.clear()
         st.rerun()
 
@@ -377,7 +379,7 @@ st.markdown("Showing **unique products only** (latest Grace price vs. lowest liv
 
 btn_col1, btn_col2 = st.columns([1, 4])
 with btn_col1:
-    force_refresh = st.button("🚀 Fetch Live Prices Now", type="primary", use_container_width=True)
+    force_refresh = st.button("🚀 Fetch Live Prices Now", type="primary", width="stretch")
 
 # Build deduplicated comparison rows
 comparison_rows = []
@@ -446,7 +448,7 @@ if not comp_df.empty:
             "Direct Purchase Link": st.column_config.LinkColumn("Purchase Online", display_text="Open Store ↗"),
             "Deal Status": st.column_config.TextColumn("Verdict")
         },
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         height=450
     )
@@ -509,7 +511,7 @@ if not inv_df.empty:
             "Days Remaining": st.column_config.NumberColumn(format="%d days"),
             "Stock Status": st.column_config.TextColumn("Health")
         },
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         height=400
     )
