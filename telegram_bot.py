@@ -42,7 +42,7 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.WARNING
 )
 logger = logging.getLogger(__name__)
 

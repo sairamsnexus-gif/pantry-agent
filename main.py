@@ -36,11 +36,11 @@ def main():
     drive_thread.start()
     print("      ✓ Google Drive Poller running in background.")
 
-    # 2. Start Telegram Bot & APScheduler Worker
-    print("[2/3] Starting Telegram Bot (@Grocery6EBot & Friday 9AM IST Scheduler)...")
+    # 2. Start Telegram Bot & APScheduler Worker (Passive Standby)
+    print("[2/3] Starting Telegram Bot (@Grocery6EBot - Passive Standby Mode)...")
     tg_thread = threading.Thread(target=run_telegram_bot_worker, daemon=True, name="TelegramBotThread")
     tg_thread.start()
-    print("      ✓ Telegram Bot & Friday 09:00 AM IST Checklist active.")
+    print("      ✓ Telegram Bot running passively in background.")
 
     # 3. Launch Streamlit Web Dashboard
     print("[3/3] Launching Streamlit Web Dashboard on Port 8501...")
