@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Secrets & Credentials
+.env
+.env.*
+*.env
+*.bak
+service_account*.json
+*.json.json
+
+# Databases & Cache
+*.db
+*.sqlite
+*.sqlite3
+price_cache.db
+processed_files.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

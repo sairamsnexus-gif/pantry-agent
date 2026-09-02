@@ -1,0 +1,14 @@
+streamlit>=1.30.0
+supabase>=2.3.0
+google-genai>=2.0.0
+google-api-python-client>=2.100.0
+google-auth>=2.20.0
+python-telegram-bot>=20.0
+apscheduler>=3.10.0
+openpyxl>=3.1.0
+pandas>=2.0.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+python-dotenv>=1.0.0
+pytz>=2023.3
+altair>=5.0.0
