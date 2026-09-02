@@ -69,62 +69,70 @@ DRIVE_FOLDER_ID = get_config("DRIVE_FOLDER_ID", "1CofRa3fSzj8OEE28OvZHefrffRuMM6
 # Import system modules
 from price_fetcher import fetch_platform_prices, get_best_online_deal, normalize_product_name
 from insights import calculate_price_comparison, generate_ai_grocery_insights
+from agent_healer import start_healer_supervisor, get_health_summary, force_self_repair
 
 # --- Background Daemon Workers with Singleton Guard & Isolated Asyncio Loops ---
 
-def start_telegram_bot():
+def start_telegram_bot() -> threading.Thread:
     """Starts Telegram Bot polling loop on an isolated asyncio event loop with error capture."""
-    token = get_config("TELEGRAM_BOT_TOKEN")
-    if not token:
-        print("[Telegram Bot]: TELEGRAM_BOT_TOKEN is not configured in st.secrets or environment. Standing by.")
-        return
+    def _worker():
+        token = get_config("TELEGRAM_BOT_TOKEN")
+        if not token:
+            print("[Telegram Bot]: TELEGRAM_BOT_TOKEN is not configured in st.secrets or environment. Standing by.")
+            return
 
-    print(f"[Telegram Bot]: Launching bot with token {token[:10]}... on dedicated event loop...")
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        from telegram_bot import run_bot
-        run_bot(token=token)
-    except Exception as e:
-        print(f"[Telegram Bot Startup Error]: Failed to start Telegram Bot: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"[Telegram Bot]: Launching bot with token {token[:10]}... on dedicated event loop...")
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            from telegram_bot import run_bot
+            run_bot(token=token)
+        except Exception as e:
+            print(f"[Telegram Bot Startup Error]: Failed to start Telegram Bot: {e}")
+            import traceback
+            traceback.print_exc()
 
-def start_drive_watcher():
+    t = threading.Thread(target=_worker, daemon=True, name="CloudTelegramBotWorker")
+    t.start()
+    return t
+
+def start_drive_watcher() -> threading.Thread:
     """Starts Google Drive recursive poller in daemon thread with error capture."""
-    try:
-        from drive_watcher import run_drive_watcher
-        print("[Drive Watcher]: Starting background poller...")
-        run_drive_watcher(interval_seconds=60)
-    except Exception as e:
-        print(f"[Drive Watcher Error]: {e}")
-        import traceback
-        traceback.print_exc()
+    def _worker():
+        try:
+            from drive_watcher import run_drive_watcher
+            print("[Drive Watcher]: Starting background poller...")
+            run_drive_watcher(interval_seconds=60)
+        except Exception as e:
+            print(f"[Drive Watcher Error]: {e}")
+            import traceback
+            traceback.print_exc()
+
+    t = threading.Thread(target=_worker, daemon=True, name="CloudDriveWatcherWorker")
+    t.start()
+    return t
 
 @st.cache_resource
 def initialize_cloud_background_workers() -> Dict[str, Any]:
     """
-    Singleton initializer ensuring Telegram Bot and Google Drive Watcher
-    run exactly ONCE in background daemon threads across all user reruns/sessions.
+    Singleton initializer ensuring Telegram Bot, Google Drive Watcher,
+    and the Autonomous SRE Agent Healer Supervisor run continuously.
     """
     print("=" * 60)
-    print("🚀 Initializing Cloud Background Daemon Workers (@st.cache_resource)...")
+    print("🚀 Initializing Cloud Background Daemon Workers & SRE Healer...")
     
-    tg_thread = threading.Thread(
-        target=start_telegram_bot,
-        daemon=True,
-        name="CloudTelegramBotWorker"
+    tg_thread = start_telegram_bot()
+    drive_thread = start_drive_watcher()
+    
+    # Start Autonomous SRE Healer Supervisor with restart callbacks
+    start_healer_supervisor(
+        tg_thread=tg_thread,
+        drive_thread=drive_thread,
+        bot_restart_fn=start_telegram_bot,
+        drive_restart_fn=start_drive_watcher
     )
-    tg_thread.start()
     
-    drive_thread = threading.Thread(
-        target=start_drive_watcher,
-        daemon=True,
-        name="CloudDriveWatcherWorker"
-    )
-    drive_thread.start()
-    
-    print("✓ Background daemon threads spawned successfully.")
+    print("✓ Background workers & SRE supervisor spawned successfully.")
     print("=" * 60)
     
     return {
@@ -237,6 +245,48 @@ with st.sidebar:
             st.success("🟢 Drive Poller Active")
         else:
             st.info("⚪ Drive Poller Standby")
+
+    # Autonomous SRE Self-Healing & Diagnostics Panel
+    with st.expander("🛠️ System Diagnostics & Self-Healing", expanded=False):
+        diag = get_health_summary()
+        
+        # Database Status
+        sb = diag.get("supabase", {})
+        sb_icon = "🟢" if sb.get("status") == "HEALTHY" else ("🟡" if sb.get("status") == "DEGRADED" else "🔴")
+        st.markdown(f"**Database:** {sb_icon} `{sb.get('status', 'N/A')}` ({sb.get('latency_ms', 0)}ms)")
+        if sb.get("message") and sb.get("status") != "HEALTHY":
+            st.caption(f"_{sb.get('message')}_")
+            
+        # Telegram Bot Status
+        tg = diag.get("telegram", {})
+        tg_icon = "🟢" if tg.get("status") == "HEALTHY" else ("🟡" if tg.get("status") == "DEGRADED" else "🔴")
+        st.markdown(f"**Telegram Bot:** {tg_icon} `{tg.get('status', 'N/A')}`")
+        st.caption(f"_{tg.get('message', '')}_")
+
+        # Drive Poller Status
+        dr = diag.get("drive", {})
+        dr_icon = "🟢" if dr.get("status") == "HEALTHY" else ("🟡" if dr.get("status") == "STANDBY" else "🔴")
+        st.markdown(f"**Drive Watcher:** {dr_icon} `{dr.get('status', 'N/A')}`")
+        st.caption(f"_{dr.get('message', '')}_")
+
+        # LLM Pipeline Status
+        llm = diag.get("llm", {})
+        llm_icon = "🟢" if llm.get("status") == "HEALTHY" else "🔴"
+        st.markdown(f"**AI Pipeline:** {llm_icon} `{llm.get('active_model', 'N/A')}`")
+
+        st.divider()
+        if st.button("🔧 Force Self-Repair & Reconnect", width="stretch", key="sre_repair_btn"):
+            with st.spinner("Executing SRE self-repair & reconnection cycle..."):
+                force_self_repair()
+                st.cache_data.clear()
+                st.rerun()
+
+        # Recent Self-Healing Actions Log
+        remediations = diag.get("remediations", [])
+        if remediations:
+            st.caption("**Recent Self-Healing Events:**")
+            for r in remediations[:3]:
+                st.text(f"• [{r.get('timestamp')}] {r.get('component')}: {r.get('result')}")
 
     st.markdown("---")
     monthly_budget = st.number_input("Monthly Budget (₹)", value=12000, step=500, min_value=1000)
@@ -574,6 +624,6 @@ st.divider()
 st.markdown("""
 <div style="text-align: center; color: #94A3B8; font-size: 0.85rem; padding: 1.5rem 0;">
     Family Grocery Intelligence System • Built with Streamlit, Supabase, Google Gemini 2.5 Flash & Python-Telegram-Bot<br>
-    Self-Contained Cloud Deployment with Non-Blocking Daemon Workers
+    Self-Contained Cloud Deployment with Autonomous Self-Healing SRE Supervisor
 </div>
 """, unsafe_allow_html=True)
