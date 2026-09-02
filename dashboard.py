@@ -475,10 +475,13 @@ if not purchases_df.empty:
     df_calc['purchase_date'] = pd.to_datetime(df_calc[date_col], errors='coerce')
     
     # Isolate September 2026 new purchases from baseline historical seed
-    # Baseline bills inserted from historical Excel had IDs <= 593 or were May-Aug
-    # Newly ingested bills (Amazon Fresh, new receipts) have ID > 593 or distinct store
+    # Baseline bills inserted from historical Excel had IDs <= 603 (May - Aug)
+    # Newly ingested bills (Amazon Fresh, new receipts, Quick Commerce) have ID > 603 and are dated Sep 2026
     if 'id' in df_calc.columns:
-        sep_mask = (df_calc['id'] > 593) | (df_calc['store_name'].str.contains('Amazon|Blinkit|Zepto|Swiggy|Flipkart', case=False, na=False))
+        sep_mask = (df_calc['id'] > 603) & (
+            ((df_calc['purchase_date'].dt.month == 9) & (df_calc['purchase_date'].dt.year == 2026)) |
+            df_calc['purchase_date'].isna()
+        )
         sep_df = df_calc[sep_mask]
         hist_df = df_calc[~sep_mask]
     else:
@@ -550,7 +553,7 @@ with st.popover("🔎 View Sep Spend Audit Breakdown", use_container_width=True)
         for _, r in sep_df.iterrows():
             rec_id = r.get('id')
             p_date_raw = pd.to_datetime(r.get('purchase_date') or r.get('purchased_at'))
-            date_str = p_date_raw.strftime('%d-%b-%Y') if pd.notnull(p_date_raw) else '02-Sep-2026'
+            date_str = p_date_raw.strftime('%d-%b-%Y') if pd.notnull(p_date_raw) else now.strftime('%d-%b-%Y')
             store = str(r.get('store_name', 'Grocery Store'))
             item = str(r.get('item_name', 'Item'))
             qty = f"{float(r.get('quantity', 1.0) or 1.0):.1f} {r.get('unit', 'units')}"
