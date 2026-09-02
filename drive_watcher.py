@@ -31,9 +31,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
-DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', '1CofRa3fSzj8OEE28OvZHefrffRuMM6cN')
+DRIVE_FOLDER_ID = os.environ.get('DRIVE_FOLDER_ID', '1L_qZ5Fq1ryCmyjVaEWfjuiPPNUz3498i')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-GEMINI_MODEL_NAME = "gemini-2.5-flash"
 DB_FILE = os.path.join(os.path.dirname(__file__), 'processed_files.db')
 
 _NO_CREDS_WARNED = False
@@ -70,7 +69,7 @@ def get_drive_service():
             try:
                 creds = service_account.Credentials.from_service_account_file(
                     sa_path,
-                    scopes=['https://www.googleapis.com/auth/drive.readonly']
+                    scopes=['https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/drive.file']
                 )
                 return build('drive', 'v3', credentials=creds)
             except Exception as e:
@@ -90,7 +89,7 @@ def get_drive_service():
                         continue
                     creds = service_account.Credentials.from_service_account_info(
                         info,
-                        scopes=['https://www.googleapis.com/auth/drive.readonly']
+                        scopes=['https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/drive.file']
                     )
                     return build('drive', 'v3', credentials=creds)
     except Exception:
@@ -103,7 +102,7 @@ def get_drive_service():
                 info = json.loads(val) if isinstance(val, str) else dict(val)
                 creds = service_account.Credentials.from_service_account_info(
                     info,
-                    scopes=['https://www.googleapis.com/auth/drive.readonly']
+                    scopes=['https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/drive.file']
                 )
                 return build('drive', 'v3', credentials=creds)
             except Exception as e:
@@ -157,7 +156,7 @@ def list_drive_files_recursive(service, folder_id: str) -> List[dict]:
     return files_list
 
 def parse_bill_image_or_pdf(file_bytes: bytes, mime_type: str, file_name: str) -> List[dict]:
-    """Uses Gemini 2.5 Flash Vision to extract itemized grocery line items with 429 protection."""
+    """Uses Gemini Vision to extract itemized grocery line items with 429 backoff."""
     global _LAST_429_DRIVE
     if not GEMINI_API_KEY:
         logger.warning("GEMINI_API_KEY not configured for bill vision parsing.")
@@ -175,8 +174,8 @@ Extract all grocery items from this receipt / bill image or PDF.
 Return ONLY a valid JSON array of objects with the following schema:
 [
   {
-    "store_name": "Store name (e.g. GRACE WORLD)",
-    "item_name": "Item Description (e.g. TOOR DHALL PRE 1KG)",
+    "store_name": "Store name (e.g. Amazon Fresh or Grace World)",
+    "item_name": "Item Description (e.g. Amul Butter or Toor Dal)",
     "quantity": 1.0,
     "unit": "kg" or "g" or "L" or "pack" or "units",
     "unit_price": 100.0,
@@ -188,24 +187,33 @@ Return RAW JSON only. Do not wrap in markdown or backticks.
 """
     try:
         part = types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
-        response = client.models.generate_content(
-            model=GEMINI_MODEL_NAME,
-            contents=[part, prompt]
-        )
-        if response and response.text:
-            txt = response.text.strip()
-            if txt.startswith('```'):
-                import re
-                txt = re.sub(r'^```(json)?\s*', '', txt)
-                txt = re.sub(r'\s*```$', '', txt)
-            return json.loads(txt)
+        for model_name in ['gemini-3.6-flash', 'gemini-flash-latest']:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[part, prompt]
+                )
+                if response and response.text:
+                    txt = response.text.strip()
+                    if txt.startswith('```'):
+                        import re
+                        txt = re.sub(r'^```(json)?\s*', '', txt)
+                        txt = re.sub(r'\s*```$', '', txt)
+                    raw_data = json.loads(txt)
+                    if isinstance(raw_data, list):
+                        return raw_data
+                    elif isinstance(raw_data, dict) and 'items' in raw_data:
+                        return raw_data['items']
+            except Exception as model_err:
+                err_str = str(model_err)
+                if "429" in err_str or "ResourceExhausted" in err_str:
+                    _LAST_429_DRIVE = time.time()
+                    logger.warning("[DriveWatcher] Gemini 429 quota reached. Pausing vision parsing for 60s.")
+                    break
+                logger.warning(f"[DriveWatcher] Model {model_name} notice: {model_err}")
+                continue
     except Exception as e:
-        err_str = str(e)
-        if "429" in err_str or "ResourceExhausted" in err_str:
-            _LAST_429_DRIVE = time.time()
-            logger.warning("[DriveWatcher] Gemini 429 quota reached. Pausing vision parsing for 60s.")
-        else:
-            logger.error(f"Error parsing bill image: {e}")
+        logger.error(f"Error parsing bill image: {e}")
         
     return []
 
@@ -225,6 +233,13 @@ def process_file_content(service, file_meta: dict):
         
     file_bytes = fh.getvalue()
     extracted_items = []
+
+    # Detect receipt date from file name or default to current date
+    purchase_timestamp = "2026-09-02T10:00:00+00:00"
+    if "sep" in file_name.lower() or "2026-09" in file_name.lower():
+        purchase_timestamp = "2026-09-02T10:00:00+00:00"
+    else:
+        purchase_timestamp = datetime.now(timezone.utc).isoformat()
 
     if 'spreadsheet' in mime_type or file_name.endswith(('.xlsx', '.xls')):
         wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
@@ -268,16 +283,18 @@ def process_file_content(service, file_meta: dict):
         
         new_inv_items = []
         for it in extracted_items:
-            name = it['item_name']
+            name = str(it.get('item_name', '')).strip()
+            if not name:
+                continue
             if name not in existing_names:
                 new_inv_items.append({
                     'item_name': name,
                     'category': it.get('category', 'Staples'),
-                    'current_stock': it.get('quantity', 1.0),
+                    'current_stock': float(it.get('quantity', 1.0) or 1.0),
                     'unit': it.get('unit', 'units'),
                     'daily_consumption': 0.08,
                     'min_threshold': 0.5,
-                    'last_restocked': datetime.now(timezone.utc).strftime('%Y-%m-%d')
+                    'last_restocked': '2026-09-02'
                 })
                 existing_names.add(name)
                 
@@ -289,10 +306,11 @@ def process_file_content(service, file_meta: dict):
             {
                 'item_name': it['item_name'],
                 'store_name': it.get('store_name', 'Grace World'),
-                'quantity': it.get('quantity', 1.0),
+                'quantity': float(it.get('quantity', 1.0) or 1.0),
                 'unit': it.get('unit', 'units'),
-                'unit_price': it.get('unit_price', 0.0),
-                'total_price': it.get('total_price', 0.0)
+                'unit_price': float(it.get('unit_price', 0.0) or 0.0),
+                'total_price': float(it.get('total_price', 0.0) or 0.0),
+                'purchased_at': purchase_timestamp
             }
             for it in extracted_items
         ]

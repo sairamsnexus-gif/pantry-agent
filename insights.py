@@ -19,7 +19,7 @@ load_dotenv('.env.env')
 
 logger = logging.getLogger("Insights")
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
-GEMINI_MODEL_NAME = "gemini-2.5-flash"
+GEMINI_MODEL_NAME = "gemini-3.6-flash"
 
 # Global cooldown tracker for 429 RateLimit/ResourceExhausted
 _LAST_429_TIME = 0.0

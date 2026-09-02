@@ -49,7 +49,7 @@ class SystemHealthRegistry:
         self.supabase_status: Dict[str, Any] = {"status": "INITIALIZING", "message": "Probing...", "latency_ms": 0}
         self.telegram_status: Dict[str, Any] = {"status": "INITIALIZING", "message": "Starting...", "retries": 0}
         self.drive_status: Dict[str, Any] = {"status": "INITIALIZING", "message": "Evaluating...", "last_poll": None}
-        self.llm_status: Dict[str, Any] = {"status": "INITIALIZING", "message": "Checking configuration...", "active_model": "gemini-2.5-flash"}
+        self.llm_status: Dict[str, Any] = {"status": "INITIALIZING", "message": "Checking configuration...", "active_model": "gemini-3.6-flash"}
         self.remediation_log: deque = deque(maxlen=max_log_size)
         self.error_log: deque = deque(maxlen=max_log_size)
         self.supervisor_alive: bool = False
@@ -184,13 +184,13 @@ def probe_llm_pipeline():
         HEALTH_REGISTRY.llm_status = {
             "status": "OFFLINE",
             "message": "GEMINI_API_KEY missing",
-            "active_model": "gemini-2.5-flash"
+            "active_model": "gemini-3.6-flash"
         }
     else:
         HEALTH_REGISTRY.llm_status = {
             "status": "HEALTHY",
             "message": "Configured & Ready",
-            "active_model": "gemini-2.5-flash"
+            "active_model": "gemini-3.6-flash"
         }
 
 def probe_and_heal_telegram_bot(restart_callback=None):
