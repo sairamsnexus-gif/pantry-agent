@@ -203,23 +203,31 @@ def parse_receipt_bytes_with_gemini(file_bytes: bytes, mime_type: str, file_name
 
     genai_client = genai.Client(api_key=api_key)
     prompt = """
-Extract all grocery items from this receipt image or document.
-Return ONLY a valid JSON object with the following schema:
+You are an expert grocery receipt and order screenshot parser.
+Analyze the provided image which may be either:
+a) A physical printed supermarket paper bill (e.g. Grace Supermarket).
+b) A mobile app checkout/order details screenshot (e.g. Amazon Fresh, Zepto, Blinkit, Swiggy Instamart, Flipkart).
+
+Extract the following strictly as clean JSON:
 {
-  "store_name": "Store name (e.g. Amazon Fresh or Grace Supermarket)",
-  "purchase_date": "2026-09-02 (or detected date in YYYY-MM-DD)",
+  "store_name": "Detected store name or platform (e.g. Amazon Fresh, Zepto, Blinkit, Grace Supermarket)",
+  "purchase_date": "YYYY-MM-DD (If not explicitly visible, default to today's date: 2026-09-03)",
+  "total_amount": 914.0,
   "items": [
     {
-      "item_name": "Item Description",
+      "name": "Clean product name (e.g. Amul Unsalted Butter)",
       "quantity": 1.0,
-      "unit": "kg" or "g" or "L" or "pack" or "units",
-      "unit_price": 100.0,
-      "total_price": 100.0,
-      "category": "Staples" or "Cooking Essentials" or "Spices" or "Cleaning & Household" or "Snacks & Packaged" or "Beverages & Dairy" or "Personal Care"
+      "unit": "500 g / unit",
+      "price": 320.0
     }
   ]
 }
-Do not add any markdown explanation. Return pure JSON.
+
+Rules:
+- For mobile app screenshots, locate the 'Items in order' or item breakdown list.
+- For 'total_amount', look for 'You pay', 'Items total', or 'Total'. In a screenshot with 'You pay ₹914', total_amount must be 914.0.
+- Ignore delivery fees, handling fees, or zero charges.
+- Always return valid JSON only, without backticks or markdown fences.
 """
     try:
         part = types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
@@ -232,13 +240,65 @@ Do not add any markdown explanation. Return pure JSON.
                         txt = re.sub(r'^```(json)?\s*', '', txt)
                         txt = re.sub(r'\s*```$', '', txt)
                     raw = json.loads(txt)
-                    if isinstance(raw, dict) and 'items' in raw:
-                        return raw
+                    
+                    if isinstance(raw, dict):
+                        store_name = raw.get('store_name') or "Grocery Store"
+                        purchase_date = raw.get('purchase_date') or "2026-09-03"
+                        total_amount = float(raw.get('total_amount', 0.0) or 0.0)
+                        items_raw = raw.get('items', [])
+                        
+                        items = []
+                        for it in items_raw:
+                            name = str(it.get('name') or it.get('item_name') or '').strip()
+                            qty = float(it.get('quantity', 1.0) or 1.0)
+                            unit = str(it.get('unit') or 'unit').strip()
+                            price = float(it.get('price') or it.get('total_price') or it.get('unit_price') or 0.0)
+                            if name:
+                                items.append({
+                                    'item_name': name,
+                                    'quantity': qty,
+                                    'unit': unit,
+                                    'unit_price': price / qty if qty > 0 else price,
+                                    'total_price': price,
+                                    'category': it.get('category', 'Staples')
+                                })
+                        
+                        # Schema Guard: If items empty but total_amount > 0
+                        if not items and total_amount > 0:
+                            items.append({
+                                'item_name': f"{store_name} Grocery Order",
+                                'quantity': 1.0,
+                                'unit': 'order',
+                                'unit_price': total_amount,
+                                'total_price': total_amount,
+                                'category': 'Staples'
+                            })
+                            
+                        if total_amount <= 0 and items:
+                            total_amount = sum(x['total_price'] for x in items)
+                            
+                        return {
+                            'store_name': store_name,
+                            'purchase_date': purchase_date,
+                            'total_amount': total_amount,
+                            'items': items
+                        }
                     elif isinstance(raw, list):
                         return {
-                            "store_name": "Grace Supermarket",
-                            "purchase_date": "2026-09-02",
-                            "items": raw
+                            "store_name": "Grocery Store",
+                            "purchase_date": "2026-09-03",
+                            "total_amount": sum(float(x.get('price') or x.get('total_price') or 0.0) for x in raw),
+                            "items": [
+                                {
+                                    'item_name': str(x.get('name') or x.get('item_name') or 'Item'),
+                                    'quantity': float(x.get('quantity', 1.0) or 1.0),
+                                    'unit': str(x.get('unit') or 'units'),
+                                    'unit_price': float(x.get('unit_price') or x.get('price') or 0.0),
+                                    'total_price': float(x.get('total_price') or x.get('price') or 0.0),
+                                    'category': x.get('category', 'Staples')
+                                }
+                                for x in raw
+                            ]
                         }
             except Exception as model_err:
                 print(f"Model {m} upload parse warning: {model_err}")
