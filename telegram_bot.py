@@ -408,11 +408,12 @@ def setup_scheduler(app: Application):
     logger.info("APScheduler initialized: Friday 09:00 AM IST checklist job active.")
     return scheduler
 
-def build_telegram_app() -> Application:
-    if not TELEGRAM_BOT_TOKEN:
-        raise ValueError("TELEGRAM_BOT_TOKEN is not set.")
+def build_telegram_app(token: str = None) -> Application:
+    bot_token = token or os.environ.get('TELEGRAM_BOT_TOKEN') or TELEGRAM_BOT_TOKEN
+    if not bot_token:
+        raise ValueError("TELEGRAM_BOT_TOKEN is not set in environment or arguments.")
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder().token(bot_token).build()
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
@@ -429,9 +430,10 @@ def build_telegram_app() -> Application:
 
     return app
 
-def run_bot():
-    print("Starting Telegram Bot & Scheduler...")
-    app = build_telegram_app()
+def run_bot(token: str = None):
+    bot_token = token or os.environ.get('TELEGRAM_BOT_TOKEN') or TELEGRAM_BOT_TOKEN
+    print(f"Starting Telegram Bot & Scheduler (Token: {bot_token[:10]}...)...")
+    app = build_telegram_app(bot_token)
     scheduler = setup_scheduler(app)
     app.run_polling(drop_pending_updates=True)
 

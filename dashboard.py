@@ -64,34 +64,37 @@ DRIVE_FOLDER_ID = get_config("DRIVE_FOLDER_ID", "1CofRa3fSzj8OEE28OvZHefrffRuMM6
 from price_fetcher import fetch_platform_prices, get_best_online_deal, normalize_product_name
 from insights import calculate_price_comparison, generate_ai_grocery_insights
 
-# --- Background Daemon Workers with Singleton Guard ---
+# --- Background Daemon Workers with Singleton Guard & Isolated Asyncio Loops ---
 
-def _run_telegram_bot_loop():
-    """Isolated thread worker running Telegram Bot & APScheduler on its own event loop."""
-    if not TELEGRAM_BOT_TOKEN:
-        print("[Telegram Bot Worker]: TELEGRAM_BOT_TOKEN not provided. Skipping bot.")
+def start_telegram_bot():
+    """Starts Telegram Bot polling loop on an isolated asyncio event loop with error capture."""
+    import asyncio
+    token = get_config("TELEGRAM_BOT_TOKEN")
+    if not token:
+        print("[Telegram Bot]: TELEGRAM_BOT_TOKEN is not configured in st.secrets or environment. Standing by.")
         return
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
+    print(f"[Telegram Bot]: Launching bot with token {token[:10]}... on dedicated event loop...")
     try:
-        from telegram_bot import build_telegram_app, setup_scheduler
-        app = build_telegram_app()
-        scheduler = setup_scheduler(app)
-        print("[Telegram Bot Worker]: Starting polling loop on daemon thread...")
-        app.run_polling(drop_pending_updates=True, close_loop=False)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        from telegram_bot import run_bot
+        run_bot(token=token)
     except Exception as e:
-        print(f"[Telegram Bot Worker Error]: {e}")
+        print(f"[Telegram Bot Startup Error]: Failed to start Telegram Bot: {e}")
+        import traceback
+        traceback.print_exc()
 
-def _run_drive_watcher_loop():
-    """Isolated thread worker running recursive Google Drive polling."""
+def start_drive_watcher():
+    """Starts Google Drive recursive poller in daemon thread with error capture."""
     try:
         from drive_watcher import run_drive_watcher
-        print("[Drive Watcher Worker]: Starting recursive poller on daemon thread...")
+        print("[Drive Watcher]: Starting background poller...")
         run_drive_watcher(interval_seconds=60)
     except Exception as e:
-        print(f"[Drive Watcher Worker Error]: {e}")
+        print(f"[Drive Watcher Error]: {e}")
+        import traceback
+        traceback.print_exc()
 
 @st.cache_resource
 def initialize_cloud_background_workers() -> Dict[str, Any]:
@@ -103,20 +106,20 @@ def initialize_cloud_background_workers() -> Dict[str, Any]:
     print("🚀 Initializing Cloud Background Daemon Workers (@st.cache_resource)...")
     
     tg_thread = threading.Thread(
-        target=_run_telegram_bot_loop,
+        target=start_telegram_bot,
         daemon=True,
         name="CloudTelegramBotWorker"
     )
     tg_thread.start()
     
     drive_thread = threading.Thread(
-        target=_run_drive_watcher_loop,
+        target=start_drive_watcher,
         daemon=True,
         name="CloudDriveWatcherWorker"
     )
     drive_thread.start()
     
-    print("✓ Background workers launched in non-blocking daemon threads.")
+    print("✓ Background daemon threads spawned successfully.")
     print("=" * 60)
     
     return {
@@ -210,16 +213,22 @@ with st.sidebar:
     
     st.divider()
     
-    # Background Service Status Indicator
+    # Background Service Status Indicators
     bot_alive = workers_handle["tg_thread"].is_alive()
     drive_alive = workers_handle["drive_thread"].is_alive()
     
     if bot_alive and drive_alive:
-        st.success("🟢 Cloud Bot & Drive Poller Active")
-    elif bot_alive or drive_alive:
-        st.warning(f"🟡 Services: {'Bot Active' if bot_alive else 'Bot Offline'} | {'Drive Poller Active' if drive_alive else 'Drive Offline'}")
+        st.success("🟢 Bot Active (@Grocery6EBot)\n🟢 Drive Poller Active")
     else:
-        st.error("🔴 Background Workers Offline")
+        if bot_alive:
+            st.success("🟢 Bot Active (@Grocery6EBot)")
+        else:
+            st.warning("🟡 Telegram Bot Offline (Check Token)")
+            
+        if drive_alive:
+            st.success("🟢 Drive Poller Active")
+        else:
+            st.info("⚪ Drive Poller Standby")
 
     st.markdown("---")
     monthly_budget = st.number_input("Monthly Budget (₹)", value=12000, step=500, min_value=1000)
